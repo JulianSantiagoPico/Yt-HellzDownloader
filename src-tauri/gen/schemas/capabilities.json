@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"Permisos mínimos de la ventana principal","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}

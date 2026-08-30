@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+artifacts/
+src-tauri/binaries/*.exe
+*.db
+*.db-shm
+*.db-wal
+.env
+NUL

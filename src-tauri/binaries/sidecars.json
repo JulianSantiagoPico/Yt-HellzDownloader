@@ -1,0 +1,21 @@
+﻿{
+    "tools":  [
+                  {
+                      "source":  "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19",
+                      "sha256":  "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
+                      "name":  "yt-dlp.exe",
+                      "version":  "2026.08.19"
+                  },
+                  {
+                      "sha256":  "72a489eccd008c2ec2c0a5856c5c75bc3d8bbfa90166c4566865c246445e6aa3",
+                      "name":  "ffmpeg.exe",
+                      "source":  "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+                  },
+                  {
+                      "sha256":  "19202b23c0043f15ad1b7bce2344f406fd52bd6efd8f995ce02e7392a1cec52f",
+                      "name":  "ffprobe.exe",
+                      "source":  "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+                  }
+              ],
+    "generatedAt":  "2026-08-30T02:29:38.7399796Z"
+}

@@ -1,0 +1,28 @@
+{
+  "name": "yt-playlist-downloader",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "tauri": "tauri",
+    "sidecars:download": "powershell -ExecutionPolicy Bypass -File scripts/download-sidecars.ps1",
+    "sidecars:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-sidecars.ps1",
+    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.4",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

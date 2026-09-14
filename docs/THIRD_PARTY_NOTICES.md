@@ -1,25 +1,33 @@
-# Avisos de terceros
+# Avisos de Terceros y Licencias
 
-## yt-dlp
+Este proyecto redistribuye herramientas de terceros bajo sus respectivas licencias de código abierto.
 
-El ejecutable oficial de yt-dlp se distribuye bajo Unlicense, ISC, MIT y las
-licencias de sus componentes empaquetados. Antes de publicar una distribución,
-debe incluirse también el archivo `THIRD_PARTY_LICENSES.txt` correspondiente a
-la versión exacta descargada desde su release oficial.
+---
 
-Fuente: https://github.com/yt-dlp/yt-dlp
+## 1. yt-dlp
 
-## FFmpeg
+- **Licencia**: Unlicense / MIT / The ISC License (según componentes).
+- **Repositorio**: [https://github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- **Aviso**: yt-dlp se distribuye como software de dominio público / Unlicense. Las dependencias empaquetadas por el build oficial de PyInstaller incluyen componentes con licencias MIT, ISC y BSD. Para cada versión activa se debe consultar el archivo oficial de licencias de terceros publicado en su release.
 
-FFmpeg se distribuye conforme a LGPL 2.1 o posterior, o GPL 2 o posterior según
-las opciones del build. El script usa el build `release-essentials` de gyan.dev,
-proveedor enlazado por el sitio oficial de FFmpeg. Antes de distribuir, se debe
-confirmar mediante `ffmpeg -L` la configuración y adjuntar el texto de licencia
-y la oferta/código fuente exigidos por ese build.
+---
 
-Fuentes:
-- https://ffmpeg.org/legal.html
-- https://www.gyan.dev/ffmpeg/builds/
+## 2. FFmpeg y ffprobe
 
-La revisión legal final y los textos íntegros son un requisito de salida de la
-Fase 0; este documento no sustituye asesoramiento legal.
+- **Versión distribuida**: Gyan.dev Essentials Build (conforme a `ffmpeg -L`).
+- **Licencia**: GNU General Public License versión 3 (GPLv3) o posterior.
+- **Configuración**:
+  `--enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-libmp3lame --enable-libx264 --enable-libx265 ...`
+- **Términos de la Licencia**:
+  > ffmpeg is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 3 of the License, or (at your option) any later version.
+  > 
+  > This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details: <https://www.gnu.org/licenses/>.
+
+- **Código fuente**: Conforme a la cláusula 6 de la GPLv3, las instrucciones y scripts de construcción del build de FFmpeg distribuido se obtienen de Gyan.dev: [https://www.gyan.dev/ffmpeg/builds/](https://www.gyan.dev/ffmpeg/builds/) y el código fuente oficial de FFmpeg se encuentra en [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html).
+
+---
+
+## 3. SQLite
+
+- **Licencia**: Dominio Público (Public Domain).
+- **Sitio oficial**: [https://www.sqlite.org/](https://www.sqlite.org/)

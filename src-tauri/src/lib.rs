@@ -1,16 +1,20 @@
-mod persistence;
-mod processes;
+pub mod audio;
+pub mod commands;
+pub mod filesystem;
+pub mod persistence;
+pub mod processes;
+pub mod youtube;
 
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::{Manager, State};
 
-use processes::{ProcessRegistry, RunToolRequest};
+use processes::ProcessRegistry;
 
-struct AppState {
-    pool: SqlitePool,
-    data_directory: String,
-    processes: ProcessRegistry,
+pub struct AppState {
+    pub pool: SqlitePool,
+    pub data_directory: String,
+    pub processes: ProcessRegistry,
 }
 
 #[derive(Serialize)]
@@ -32,20 +36,6 @@ async fn health_check(state: State<'_, AppState>) -> Result<HealthStatus, String
     })
 }
 
-#[tauri::command]
-async fn run_tool(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    request: RunToolRequest,
-) -> Result<i32, String> {
-    processes::run(app, state.processes.clone(), request).await
-}
-
-#[tauri::command]
-async fn cancel_tool(state: State<'_, AppState>, run_id: String) -> Result<bool, String> {
-    Ok(processes::cancel(&state.processes, &run_id).await)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -64,8 +54,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             health_check,
-            run_tool,
-            cancel_tool
+            commands::download_single_track,
+            commands::cancel_download,
+            commands::get_default_output_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

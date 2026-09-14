@@ -1627,6 +1627,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "id3"
+version = "1.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24993fcabcbc07c8ac076a8e62db8593d1a5c4dbe81d57e531d2b7cb7f737380"
+dependencies = [
+ "bitflags 2.13.1",
+ "byteorder",
+ "flate2",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5389,6 +5400,7 @@ dependencies = [
 name = "yt-playlist-downloader"
 version = "0.1.0"
 dependencies = [
+ "id3",
  "serde",
  "serde_json",
  "sqlx",
@@ -5398,7 +5410,9 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "url",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

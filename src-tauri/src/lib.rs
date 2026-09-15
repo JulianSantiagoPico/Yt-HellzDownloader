@@ -3,6 +3,7 @@ pub mod commands;
 pub mod filesystem;
 pub mod persistence;
 pub mod processes;
+pub mod updater;
 pub mod youtube;
 
 use serde::Serialize;
@@ -56,7 +57,11 @@ pub fn run() {
             health_check,
             commands::download_single_track,
             commands::cancel_download,
-            commands::get_default_output_directory
+            commands::get_default_output_directory,
+            commands::get_ytdlp_version,
+            commands::check_ytdlp_updates,
+            commands::update_ytdlp,
+            commands::extract_playlist,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

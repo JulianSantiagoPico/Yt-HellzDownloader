@@ -9,7 +9,7 @@ use tokio::{process::Command, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    processes::{spawn_in_job, tool_path, Tool},
+    processes::{read_bounded_string, spawn_in_job, tool_path, Tool},
     youtube::VideoMetadata,
 };
 
@@ -60,10 +60,7 @@ pub async fn convert_to_mp3(
         .take()
         .ok_or("No se pudo capturar stderr de FFmpeg")?;
     let stderr_reader = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut err = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut err).await;
-        err
+        read_bounded_string(stderr, 64 * 1024).await
     });
 
     let execution = async {
@@ -88,10 +85,7 @@ pub async fn convert_to_mp3(
 
     let stderr_output = stderr_reader.await.unwrap_or_default();
     if !exit_status.success() {
-        return Err(format!(
-            "FFmpeg falló al convertir a MP3: {}",
-            stderr_output.trim()
-        ));
+        return Err(classify_ffmpeg_error(&stderr_output, "FFmpeg falló al convertir a MP3"));
     }
 
     if !output_mp3.exists() {
@@ -99,6 +93,25 @@ pub async fn convert_to_mp3(
     }
 
     Ok(())
+}
+
+/// Clasifica el stderr de FFmpeg en mensajes útiles.
+fn classify_ffmpeg_error(stderr: &str, prefix: &str) -> String {
+    let lower = stderr.to_ascii_lowercase();
+    let msg = if lower.contains("no such file") || lower.contains("cannot open") {
+        "No se encontró el archivo de entrada. Es posible que la descarga se haya cancelado antes de completarse."
+    } else if lower.contains("invalid data") || lower.contains("invalid argument") {
+        "El formato del archivo de audio no es compatible o está corrupto."
+    } else if lower.contains("permission denied") {
+        "No se tienen permisos para escribir en la ubicación de destino."
+    } else if lower.contains("no space left") {
+        "No hay suficiente espacio en disco para guardar el archivo."
+    } else if lower.contains("codec not found") || lower.contains("unknown encoder") {
+        "El códec de audio requerido no está disponible en esta versión de FFmpeg."
+    } else {
+        return format!("{prefix}: {}", stderr.trim());
+    };
+    format!("{prefix}: {msg} Detalles: {}", stderr.trim())
 }
 
 /// Escribe etiquetas ID3v2.3 y verifica inmediatamente que los frames críticos son legibles.
@@ -231,10 +244,7 @@ pub async fn validate_mp3(
     });
 
     let stderr_reader = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut err = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut err).await;
-        err
+        read_bounded_string(stderr, 64 * 1024).await
     });
 
     let execution = async {

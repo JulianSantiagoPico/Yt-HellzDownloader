@@ -75,9 +75,16 @@ pub fn tool_path(resource_dir: &Path, tool: Tool) -> Result<PathBuf, String> {
 }
 
 /// Inicia un proceso asociado obligatoriamente a un Windows Job Object.
+/// En Windows, oculta la ventana de consola mediante `CREATE_NO_WINDOW`.
 pub fn spawn_in_job(
     mut command: tokio::process::Command,
 ) -> Result<(tokio::process::Child, JobObjectHandle), String> {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
     let job = JobObjectHandle::new()?;
     let child = command
         .spawn()
@@ -156,6 +163,47 @@ mod tests {
         registry.remove_token("job-1").await;
         let token3 = CancellationToken::new();
         assert!(registry.insert_token("job-1".into(), token3).await.is_ok());
+    }
+
+    /// Verifica que la cancelación termina el proceso y no deja huérfanos.
+    /// Usa un sleep largo que debería ser terminado por el Job Object.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_cancellation_terminates_process_tree() {
+        use std::process::Stdio;
+        use std::time::Instant;
+
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(&["/c", "timeout", "/t", "30", "/nobreak"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let (mut child, job) = spawn_in_job(cmd).expect("debe spawnear proceso");
+        let start = Instant::now();
+
+        // Cancelamos inmediatamente
+        let _ = job.terminate(1);
+
+        // El proceso debe terminar antes del timeout de 30s
+        // Esperamos un máximo de 5 segundos para confirmar terminación
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            child.wait(),
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_ok(),
+            "El proceso no terminó tras cancelación (esperó {:?})",
+            elapsed
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "La cancelación tardó demasiado: {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

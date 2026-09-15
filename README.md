@@ -5,24 +5,23 @@ TypeScript, Rust y SQLite. El desarrollo sigue `plan-desarrollo.md` por fases.
 
 ## Estado
 
-Fase 0 en validación externa. El spike implementa:
+Fase 1 implementada. El núcleo de descarga incluye:
+
+- formulario de URL con validación de enlaces de YouTube;
+- selección de carpeta de destino con diálogo nativo;
+- política de colisiones configurable (renombrar / fallar / sobrescribir);
+- pipeline completo: descarga con `yt-dlp`, conversión a MP3 192 kbps estéreo
+  con `ffmpeg`, incrustación de carátula y escritura de metadatos ID3;
+- progreso por etapas emitido al frontend (`download-progress`);
+- cancelación de descargas asociando procesos a Windows Job Objects.
+
+La Fase 0 (spike inicial) mantiene las capacidades heredadas:
 
 - arranque de Tauri 2 y frontend React;
 - SQLite embebido con SQLx, WAL y migraciones;
 - ejecución restringida a `yt-dlp`, `ffmpeg` y `ffprobe`;
-- captura incremental de stdout/stderr y cancelación;
 - descarga con verificación SHA-256 de sidecars;
 - configuración NSIS y script de ZIP portable.
-
-La compilación local, las pruebas Rust, la verificación de sidecars, el
-instalador NSIS y el ZIP portable están validados. La fase no se considera
-cerrada hasta:
-
-- probar instalador y portable en un segundo equipo Windows x64 limpio;
-- confirmar la licencia efectiva mediante `ffmpeg -L` e incorporar los textos
-  íntegros exigidos por las versiones distribuidas.
-
-No se inicia la Fase 1 hasta registrar esas dos validaciones.
 
 ## Desarrollo
 

@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::{
     audio,
     filesystem::{self, ExistingFilePolicy},
-    youtube::{self, VideoMetadata},
+    updater::{self, ReleaseEntry, UpdateResult, YtdlpVersionInfo},
+    youtube::{self, PlaylistInfo, VideoMetadata},
     AppState,
 };
 
@@ -256,4 +257,46 @@ fn emit_stage(app: &AppHandle, run_id: &str, stage: &str, percent: f32, message:
             message: message.to_string(),
         },
     );
+}
+
+#[tauri::command]
+pub async fn get_ytdlp_version(app: AppHandle) -> Result<YtdlpVersionInfo, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Error de ruta de recursos: {}", e))?;
+    updater::get_current_version(&resource_dir).await
+}
+
+#[tauri::command]
+pub async fn check_ytdlp_updates(
+    app: AppHandle,
+    manifest_url: String,
+) -> Result<Vec<ReleaseEntry>, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Error de ruta de recursos: {}", e))?;
+    let token = CancellationToken::new();
+    updater::check_for_updates(&resource_dir, &manifest_url, &token).await
+}
+
+#[tauri::command]
+pub async fn update_ytdlp(app: AppHandle, release: ReleaseEntry) -> Result<UpdateResult, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Error de ruta de recursos: {}", e))?;
+    let token = CancellationToken::new();
+    updater::update_binary(&resource_dir, &release, &token).await
+}
+
+#[tauri::command]
+pub async fn extract_playlist(app: AppHandle, url: String) -> Result<PlaylistInfo, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Error de ruta de recursos: {}", e))?;
+    let token = CancellationToken::new();
+    youtube::extract_playlist(&resource_dir, &url, &token).await
 }

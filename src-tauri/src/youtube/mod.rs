@@ -13,7 +13,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::processes::{spawn_in_job, tool_path, Tool};
+use crate::processes::{read_bounded_string, spawn_in_job, tool_path, Tool};
+
+pub mod errors;
 
 const ALLOWED_HOSTS: &[&str] = &[
     "youtube.com",
@@ -22,6 +24,13 @@ const ALLOWED_HOSTS: &[&str] = &[
     "music.youtube.com",
     "youtu.be",
 ];
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UrlType {
+    SingleVideo,
+    Playlist,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,8 +45,39 @@ pub struct VideoMetadata {
     pub thumbnail_url: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistEntry {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub artist: String,
+    pub duration_seconds: Option<f64>,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistInfo {
+    pub playlist_id: String,
+    pub title: String,
+    pub entry_count: usize,
+    pub entries: Vec<PlaylistEntry>,
+}
+
+/// Resultado de la validación: puede ser un vídeo individual o una playlist.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidatedUrl {
+    pub url_type: UrlType,
+    pub video_id: Option<String>,
+    pub playlist_id: Option<String>,
+    pub canonical_url: String,
+}
+
 /// Valida y normaliza rigurosamente una URL de YouTube utilizando el crate `url`.
-pub fn validate_and_normalize_youtube_url(raw_url: &str) -> Result<(String, String), String> {
+/// Devuelve un `ValidatedUrl` que indica si es un vídeo individual o una playlist.
+pub fn validate_youtube_url(raw_url: &str) -> Result<ValidatedUrl, String> {
     let parsed = Url::parse(raw_url.trim()).map_err(|_| "URL inválida".to_string())?;
 
     if parsed.scheme() != "https" {
@@ -63,14 +103,40 @@ pub fn validate_and_normalize_youtube_url(raw_url: &str) -> Result<(String, Stri
         return Err("Dominio no autorizado. Solo se permite YouTube y YouTube Music.".into());
     }
 
+    let path = parsed.path();
+
+    // Detectar playlist: /playlist?list=<id>
+    if path == "/playlist" {
+        let mut playlist_id = None;
+        for (key, val) in parsed.query_pairs() {
+            if key == "list" {
+                playlist_id = Some(val.to_string());
+                break;
+            }
+        }
+        let pl_id = playlist_id.ok_or("Parámetro 'list' ausente en la URL de playlist")?;
+
+        return Ok(ValidatedUrl {
+            url_type: UrlType::Playlist,
+            video_id: None,
+            playlist_id: Some(pl_id),
+            canonical_url: raw_url.trim().to_string(),
+        });
+    }
+
+    // Vídeo individual: youtu.be/<id> o /watch?v=<id>
     let video_id = if host == "youtu.be" {
-        let path = parsed.path().trim_start_matches('/');
-        let id = path.split('/').next().unwrap_or("");
-        id.to_string()
-    } else {
-        if parsed.path() != "/watch" {
+        let vid = path.trim_start_matches('/');
+        if vid.is_empty() || vid.contains('/') {
             return Err(
-                "Ruta de YouTube inválida. Se espera una URL de reproducción (/watch)".into(),
+                "Ruta de youtu.be inválida. Se espera youtu.be/<id>".into(),
+            );
+        }
+        vid.to_string()
+    } else {
+        if path != "/watch" {
+            return Err(
+                "Ruta de YouTube inválida. Se espera una URL de reproducción (/watch) o playlist (/playlist)".into(),
             );
         }
         let mut id = None;
@@ -83,7 +149,6 @@ pub fn validate_and_normalize_youtube_url(raw_url: &str) -> Result<(String, Stri
         id.ok_or("Parámetro 'v' ausente en la URL")?
     };
 
-    // Validar formato estándar del ID de vídeo de YouTube (11 caracteres alfanuméricos, guiones o barras bajas)
     if video_id.len() != 11
         || !video_id
             .chars()
@@ -93,7 +158,27 @@ pub fn validate_and_normalize_youtube_url(raw_url: &str) -> Result<(String, Stri
     }
 
     let canonical_url = format!("https://www.youtube.com/watch?v={}", video_id);
-    Ok((video_id, canonical_url))
+    Ok(ValidatedUrl {
+        url_type: UrlType::SingleVideo,
+        video_id: Some(video_id),
+        playlist_id: None,
+        canonical_url,
+    })
+}
+
+/// Función de compatibilidad: valida y normaliza una URL devolviendo (video_id, canonical_url).
+/// Para playlists, devuelve un error indicando que se use `validate_youtube_url`.
+pub fn validate_and_normalize_youtube_url(raw_url: &str) -> Result<(String, String), String> {
+    let validated = validate_youtube_url(raw_url)?;
+    match validated.url_type {
+        UrlType::SingleVideo => Ok((
+            validated.video_id.unwrap_or_default(),
+            validated.canonical_url,
+        )),
+        UrlType::Playlist => Err(
+            "Esta es una URL de playlist. Use el flujo de descarga de playlist.".into(),
+        ),
+    }
 }
 
 /// Extrae metadata del vídeo usando yt-dlp con Job Object y timeout de 45 segundos.
@@ -139,17 +224,7 @@ pub async fn extract_metadata(
     });
 
     let stderr_reader = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut err = String::new();
-        let mut line = String::new();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 || err.len() > 64 * 1024 {
-                break;
-            }
-            err.push_str(&line);
-            line.clear();
-        }
-        err
+        read_bounded_string(stderr, 64 * 1024).await
     });
 
     let execution = async {
@@ -176,10 +251,12 @@ pub async fn extract_metadata(
     let stderr_content = stderr_reader.await.unwrap_or_default();
 
     if !exit_status.success() {
-        return Err(format!(
-            "No se pudo extraer metadata del vídeo: {}",
-            stderr_content.trim()
-        ));
+        let classified = errors::classify_ytdlp_error(
+            stderr_content.trim(),
+            "No se pudo extraer metadata del vídeo",
+        );
+        return Err(serde_json::to_string(&classified)
+            .unwrap_or_else(|_| classified.user_message));
     }
 
     let json_val: serde_json::Value = serde_json::from_str(&stdout_content)
@@ -212,6 +289,134 @@ pub async fn extract_metadata(
         upload_date,
         duration_seconds,
         thumbnail_url,
+    })
+}
+
+/// Extrae la lista de vídeos de una playlist usando yt-dlp.
+pub async fn extract_playlist(
+    resource_dir: &Path,
+    url: &str,
+    token: &CancellationToken,
+) -> Result<PlaylistInfo, String> {
+    let validated = validate_youtube_url(url)?;
+    let playlist_id = validated
+        .playlist_id
+        .ok_or("La URL no es una playlist")?;
+
+    let ytdlp_path = tool_path(resource_dir, Tool::YtDlp)?;
+
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args([
+        "--flat-playlist",
+        "--dump-single-json",
+        "--no-warnings",
+        &validated.canonical_url,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+
+    let (mut child, job) = spawn_in_job(cmd)?;
+
+    let stdout = child.stdout.take().ok_or("No se pudo capturar stdout")?;
+    let stderr = child.stderr.take().ok_or("No se pudo capturar stderr")?;
+
+    let stdout_reader = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = String::new();
+        let mut line = String::new();
+        while let Ok(n) = reader.read_line(&mut line).await {
+            if n == 0 || buf.len() > 10 * 1024 * 1024 {
+                break;
+            }
+            buf.push_str(&line);
+            line.clear();
+        }
+        buf
+    });
+
+    let stderr_reader = tokio::spawn(async move {
+        read_bounded_string(stderr, 64 * 1024).await
+    });
+
+    let execution = async {
+        tokio::select! {
+            res = child.wait() => res.map_err(|e| e.to_string()),
+            _ = token.cancelled() => {
+                let _ = job.terminate(1);
+                let _ = child.kill().await;
+                Err("Operación cancelada".into())
+            }
+        }
+    };
+
+    let exit_status = match timeout(Duration::from_secs(120), execution).await {
+        Ok(res) => res?,
+        Err(_) => {
+            let _ = job.terminate(1);
+            let _ = child.kill().await;
+            return Err("Tiempo de espera agotado al obtener la playlist".into());
+        }
+    };
+
+    let stdout_content = stdout_reader.await.unwrap_or_default();
+    let stderr_content = stderr_reader.await.unwrap_or_default();
+
+    if !exit_status.success() {
+        let classified = errors::classify_ytdlp_error(
+            stderr_content.trim(),
+            "No se pudo extraer la playlist",
+        );
+        return Err(serde_json::to_string(&classified)
+            .unwrap_or_else(|_| classified.user_message));
+    }
+
+    let json_val: serde_json::Value = serde_json::from_str(&stdout_content)
+        .map_err(|e| format!("Error al analizar metadata de playlist: {}", e))?;
+
+    let title = json_val["title"]
+        .as_str()
+        .unwrap_or("Playlist desconocida")
+        .to_string();
+
+    let entries_val = json_val["entries"]
+        .as_array()
+        .ok_or("No se encontraron entradas en la playlist")?;
+
+    let entries: Vec<PlaylistEntry> = entries_val
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| {
+            let id = entry["id"].as_str()?.to_string();
+            let entry_title = entry["title"]
+                .as_str()
+                .unwrap_or("Sin título")
+                .to_string();
+            let artist = entry["uploader"]
+                .as_str()
+                .or_else(|| entry["channel"].as_str())
+                .unwrap_or("Artista desconocido")
+                .to_string();
+            let duration = entry["duration"].as_f64();
+            let video_url = format!("https://www.youtube.com/watch?v={}", id);
+
+            Some(PlaylistEntry {
+                id,
+                url: video_url,
+                title: entry_title,
+                artist,
+                duration_seconds: duration,
+                index: i + 1,
+            })
+        })
+        .collect();
+
+    Ok(PlaylistInfo {
+        playlist_id,
+        title,
+        entry_count: entries.len(),
+        entries,
     })
 }
 
@@ -282,17 +487,7 @@ where
     });
 
     let stderr_reader = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut err = String::new();
-        let mut line = String::new();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 || err.len() > 64 * 1024 {
-                break;
-            }
-            err.push_str(&line);
-            line.clear();
-        }
-        err
+        read_bounded_string(stderr, 64 * 1024).await
     });
 
     let execution = async {
@@ -320,10 +515,12 @@ where
     let stderr_content = stderr_reader.await.unwrap_or_default();
 
     if !exit_status.success() {
-        return Err(format!(
-            "Fallo en la descarga de yt-dlp: {}",
-            stderr_content.trim()
-        ));
+        let classified = errors::classify_ytdlp_error(
+            stderr_content.trim(),
+            "Fallo en la descarga de yt-dlp",
+        );
+        return Err(serde_json::to_string(&classified)
+            .unwrap_or_else(|_| classified.user_message));
     }
 
     let entries = std::fs::read_dir(temp_dir).map_err(|e| e.to_string())?;
@@ -391,9 +588,66 @@ mod tests {
         assert!(validate_and_normalize_youtube_url("not an url").is_err());
     }
 
+    #[test]
+    fn test_validate_youtube_url_playlist() {
+        let result = validate_youtube_url(
+            "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf",
+        )
+        .unwrap();
+        assert_eq!(result.url_type, UrlType::Playlist);
+        assert_eq!(
+            result.playlist_id.as_deref(),
+            Some("PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+        );
+        assert!(result.video_id.is_none());
+    }
+
+    #[test]
+    fn test_validate_youtube_url_music_playlist() {
+        let result = validate_youtube_url(
+            "https://music.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf",
+        )
+        .unwrap();
+        assert_eq!(result.url_type, UrlType::Playlist);
+        assert_eq!(
+            result.playlist_id.as_deref(),
+            Some("PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+        );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_youtube_music_url_with_list_param() {
+        // Caso exacto del diagnóstico: URL de YouTube Music con parámetro list
+        let (id, canonical) = validate_and_normalize_youtube_url(
+            "https://music.youtube.com/watch?v=UnnwqBV5YWk&list=RDAMVMr46x3JsGhLc",
+        )
+        .unwrap();
+        assert_eq!(id, "UnnwqBV5YWk");
+        assert_eq!(canonical, "https://www.youtube.com/watch?v=UnnwqBV5YWk");
+    }
+
+    #[test]
+    fn test_validate_youtube_url_youtu_be_strict() {
+        // youtu.be debe rechazar rutas con segmentos adicionales
+        assert!(validate_youtube_url("https://youtu.be/dQw4w9WgXcQ/extra").is_err());
+        // youtu.be debe rechazar path vacío
+        assert!(validate_youtube_url("https://youtu.be/").is_err());
+        // Caso válido sigue funcionando
+        let result = validate_youtube_url("https://youtu.be/dQw4w9WgXcQ").unwrap();
+        assert_eq!(result.video_id.as_deref(), Some("dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn test_validate_and_normalize_rejects_playlist() {
+        let result = validate_and_normalize_youtube_url(
+            "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("playlist"));
+    }
+
     #[tokio::test]
     async fn test_metadata_extraction_timeout_handling() {
-        // Probar que el mecanismo de timeout aborta operaciones que exceden el tiempo límite
         let slow_future = async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok::<(), String>(())

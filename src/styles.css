@@ -43,6 +43,40 @@ h1 {
   font-size: 1rem;
 }
 
+/* Version Card */
+.version-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+}
+
+.version-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.version-label {
+  font-weight: 600;
+  color: #94a3b8;
+  font-size: 0.88rem;
+}
+
+.version-value {
+  color: #38bdf8;
+  font-family: monospace;
+  font-size: 0.88rem;
+}
+
+.update-message {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #94a3b8;
+  width: 100%;
+}
+
 .card {
   background: #1e293b;
   border: 1px solid #334155;
@@ -252,4 +286,81 @@ button:disabled {
   color: #fca5a5;
   font-size: 0.92rem;
   word-break: break-word;
+}
+
+.error-details-toggle {
+  background: transparent;
+  border: 1px solid #f87171;
+  color: #fca5a5;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  margin-top: 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.error-details-toggle:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.error-raw-stderr {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: #94a3b8;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.error-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.export-diagnostic {
+  margin-left: auto;
+}
+
+/* Categorías de error con colores diferenciados */
+.error-title[data-category="Bloqueo anti-automatización"] {
+  color: #fbbf24;
+  border-left: 3px solid #f59e0b;
+  padding-left: 10px;
+}
+
+.error-title[data-category="Vídeo privado"] {
+  color: #a78bfa;
+  border-left: 3px solid #8b5cf6;
+  padding-left: 10px;
+}
+
+.error-title[data-category="Vídeo eliminado"] {
+  color: #94a3b8;
+  border-left: 3px solid #64748b;
+  padding-left: 10px;
+}
+
+.error-title[data-category="Restricción regional"] {
+  color: #60a5fa;
+  border-left: 3px solid #3b82f6;
+  padding-left: 10px;
+}
+
+.error-title[data-category="Error de red"] {
+  color: #f87171;
+  border-left: 3px solid #ef4444;
+  padding-left: 10px;
+}
+
+.error-title[data-category="Error de yt-dlp"] {
+  color: #f87171;
+  border-left: 3px solid #ef4444;
+  padding-left: 10px;
 }

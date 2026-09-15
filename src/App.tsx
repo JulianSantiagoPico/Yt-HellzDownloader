@@ -30,6 +30,55 @@ interface JobEvent {
   total?: number;
 }
 
+function formatErrorMessage(err: unknown): string {
+  if (!err) return "Ha ocurrido un error inesperado.";
+
+  let rawMessage = "";
+
+  if (typeof err === "string") {
+    rawMessage = err;
+  } else if (typeof err === "object") {
+    const errorObj = err as Record<string, unknown>;
+    if (typeof errorObj.userMessage === "string") {
+      return errorObj.userMessage;
+    }
+    if (typeof errorObj.user_message === "string") {
+      return errorObj.user_message;
+    }
+    if (typeof errorObj.message === "string") {
+      rawMessage = errorObj.message;
+    } else {
+      try {
+        return JSON.stringify(err, null, 2);
+      } catch {
+        return String(err);
+      }
+    }
+  } else {
+    return String(err);
+  }
+
+  // Verificar si rawMessage contiene un objeto JSON clasificado (ej. error de yt-dlp)
+  const jsonStart = rawMessage.indexOf("{");
+  const jsonEnd = rawMessage.lastIndexOf("}");
+  if (jsonStart !== -1 && jsonEnd > jsonStart) {
+    try {
+      const parsed = JSON.parse(rawMessage.slice(jsonStart, jsonEnd + 1));
+      if (parsed && typeof parsed === "object") {
+        const userMsg = parsed.userMessage || parsed.user_message || parsed.message;
+        if (typeof userMsg === "string") {
+          const prefix = rawMessage.slice(0, jsonStart).trim().replace(/:\s*$/, "");
+          return prefix ? `${prefix}: ${userMsg}` : userMsg;
+        }
+      }
+    } catch {
+      // Mantener rawMessage
+    }
+  }
+
+  return rawMessage;
+}
+
 export function App() {
   const [url, setUrl] = useState("");
   const [outputDir, setOutputDir] = useState("");
@@ -120,7 +169,7 @@ export function App() {
         setExtractionProgress(null);
       }
     } catch (err) {
-      setError(String(err));
+      setError(formatErrorMessage(err));
       setExtractionProgress(null);
     } finally {
       setIsCreating(false);

@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "tauri": "tauri",
+    "versions:check": "node scripts/check-versions.mjs",
+    "version:set": "node scripts/set-version.mjs",
+    "prepare": "husky",
     "sidecars:download": "powershell -ExecutionPolicy Bypass -File scripts/download-sidecars.ps1",
     "sidecars:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-sidecars.ps1",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1"
@@ -18,10 +21,13 @@
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1",
     "@tauri-apps/cli": "^2.8.4",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.2",
+    "husky": "^9.1.7",
     "typescript": "^5.9.2",
     "vite": "^7.1.3"
   }

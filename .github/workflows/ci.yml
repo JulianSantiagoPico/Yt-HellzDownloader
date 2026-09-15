@@ -49,9 +49,9 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - run: cargo check --manifest-path src-tauri/Cargo.toml
       - name: Download and verify test sidecars
         run: |
           npm run sidecars:download
           npm run sidecars:verify
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
       - run: cargo test --manifest-path src-tauri/Cargo.toml

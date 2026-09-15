@@ -5,6 +5,20 @@ $Bin = Join-Path $Root "src-tauri\binaries"
 $Temp = Join-Path ([System.IO.Path]::GetTempPath()) ("ytpd-sidecars-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $Bin, $Temp | Out-Null
 
+function Get-Sha256([string]$Path) {
+    $Hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $Stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant()
+        } finally {
+            $Stream.Dispose()
+        }
+    } finally {
+        $Hasher.Dispose()
+    }
+}
+
 function Download-Verified([string]$Url, [string]$HashUrl, [string]$Name) {
     $Target = Join-Path $Temp $Name
     Invoke-WebRequest -UseBasicParsing $Url -OutFile $Target
@@ -22,7 +36,7 @@ function Download-Verified([string]$Url, [string]$HashUrl, [string]$Name) {
     } else {
         throw "No se encontró checksum publicado para $Name"
     }
-    $Actual = (Get-FileHash -Algorithm SHA256 $Target).Hash.ToLowerInvariant()
+    $Actual = Get-Sha256 $Target
     if ($Actual -ne $Expected) { throw "Checksum inválido para $Name" }
     return @{ Path = $Target; Sha256 = $Actual }
 }
@@ -45,9 +59,9 @@ try {
     $Manifest = @{
         generatedAt = (Get-Date).ToUniversalTime().ToString("o")
         tools = @(
-            @{ name = "yt-dlp.exe"; version = $YtRelease.tag_name; sha256 = (Get-FileHash (Join-Path $Bin "yt-dlp.exe") -Algorithm SHA256).Hash.ToLowerInvariant(); source = "https://github.com/yt-dlp/yt-dlp/releases/tag/$($YtRelease.tag_name)" },
-            @{ name = "ffmpeg.exe"; sha256 = (Get-FileHash (Join-Path $Bin "ffmpeg.exe") -Algorithm SHA256).Hash.ToLowerInvariant(); source = $FfmpegUrl },
-            @{ name = "ffprobe.exe"; sha256 = (Get-FileHash (Join-Path $Bin "ffprobe.exe") -Algorithm SHA256).Hash.ToLowerInvariant(); source = $FfmpegUrl }
+            @{ name = "yt-dlp.exe"; version = $YtRelease.tag_name; sha256 = (Get-Sha256 (Join-Path $Bin "yt-dlp.exe")); source = "https://github.com/yt-dlp/yt-dlp/releases/tag/$($YtRelease.tag_name)" },
+            @{ name = "ffmpeg.exe"; sha256 = (Get-Sha256 (Join-Path $Bin "ffmpeg.exe")); source = $FfmpegUrl },
+            @{ name = "ffprobe.exe"; sha256 = (Get-Sha256 (Join-Path $Bin "ffprobe.exe")); source = $FfmpegUrl }
         )
     }
     $Manifest | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Bin "sidecars.json") -Encoding UTF8

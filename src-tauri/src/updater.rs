@@ -76,9 +76,7 @@ fn compute_sha256(path: &Path) -> Result<String, String> {
 
 /// Carga el manifiesto de actualizaciones desde el directorio de recursos.
 fn load_manifest(resource_dir: &Path) -> Result<UpdateManifest, String> {
-    let manifest_path = resource_dir
-        .join("yt-dlp-manifest.json")
-        .to_path_buf();
+    let manifest_path = resource_dir.join("yt-dlp-manifest.json").to_path_buf();
 
     if !manifest_path.exists() {
         return Ok(UpdateManifest {
@@ -89,8 +87,7 @@ fn load_manifest(resource_dir: &Path) -> Result<UpdateManifest, String> {
 
     let content = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Error al leer manifiesto: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Error al parsear manifiesto: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Error al parsear manifiesto: {}", e))
 }
 
 /// Guarda el manifiesto de actualizaciones.
@@ -138,8 +135,11 @@ pub async fn check_for_updates(
     let mut local_manifest = load_manifest(resource_dir)?;
 
     // Fusionar: agregar versiones que no existen localmente
-    let existing_versions: std::collections::HashSet<String> =
-        local_manifest.releases.iter().map(|r| r.version.clone()).collect();
+    let existing_versions: std::collections::HashSet<String> = local_manifest
+        .releases
+        .iter()
+        .map(|r| r.version.clone())
+        .collect();
 
     for release in &remote_manifest.releases {
         if !existing_versions.contains(&release.version) {
@@ -163,8 +163,7 @@ pub async fn update_binary(
 
     // Crear backup del binario actual
     let backup_path = binary_path.with_extension("exe.bak");
-    fs::copy(&binary_path, &backup_path)
-        .map_err(|e| format!("Error al crear backup: {}", e))?;
+    fs::copy(&binary_path, &backup_path).map_err(|e| format!("Error al crear backup: {}", e))?;
 
     let client = Client::builder()
         .timeout(Duration::from_secs(120))

@@ -174,7 +174,7 @@ mod tests {
         use std::time::Instant;
 
         let mut cmd = tokio::process::Command::new("cmd.exe");
-        cmd.args(&["/c", "timeout", "/t", "30", "/nobreak"])
+        cmd.args(["/c", "timeout", "/t", "30", "/nobreak"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -187,11 +187,7 @@ mod tests {
 
         // El proceso debe terminar antes del timeout de 30s
         // Esperamos un máximo de 5 segundos para confirmar terminación
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            child.wait(),
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
 
         let elapsed = start.elapsed();
         assert!(
@@ -216,4 +212,3 @@ mod tests {
         assert_eq!(bounded.len(), 64 * 1024);
     }
 }
-

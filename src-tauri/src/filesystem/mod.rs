@@ -15,9 +15,24 @@ const RESERVED_NAMES: &[&str] = &[
 #[serde(rename_all = "snake_case")]
 pub enum ExistingFilePolicy {
     #[default]
-    Rename,
-    FailIfExists,
+    Ask,
+    Reuse,
     Overwrite,
+    Rename,
+    #[serde(alias = "fail_if_exists")]
+    FailIfExists,
+}
+
+impl ExistingFilePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Reuse => "reuse",
+            Self::Overwrite => "overwrite",
+            Self::Rename => "rename",
+            Self::FailIfExists => "fail_if_exists",
+        }
+    }
 }
 
 /// Sanitiza un nombre de archivo para Windows, considerando caracteres prohibidos,
@@ -99,11 +114,11 @@ pub fn resolve_destination_path(
     }
 
     match policy {
-        ExistingFilePolicy::FailIfExists => Err(format!(
+        ExistingFilePolicy::FailIfExists | ExistingFilePolicy::Ask => Err(format!(
             "El archivo '{}' ya existe en el destino y la política impide sobrescribirlo.",
             base_filename
         )),
-        ExistingFilePolicy::Overwrite => Ok(target_path),
+        ExistingFilePolicy::Reuse | ExistingFilePolicy::Overwrite => Ok(target_path),
         ExistingFilePolicy::Rename => {
             let stem = target_path
                 .file_stem()

@@ -128,9 +128,7 @@ pub fn validate_youtube_url(raw_url: &str) -> Result<ValidatedUrl, String> {
     let video_id = if host == "youtu.be" {
         let vid = path.trim_start_matches('/');
         if vid.is_empty() || vid.contains('/') {
-            return Err(
-                "Ruta de youtu.be inválida. Se espera youtu.be/<id>".into(),
-            );
+            return Err("Ruta de youtu.be inválida. Se espera youtu.be/<id>".into());
         }
         vid.to_string()
     } else {
@@ -175,9 +173,9 @@ pub fn validate_and_normalize_youtube_url(raw_url: &str) -> Result<(String, Stri
             validated.video_id.unwrap_or_default(),
             validated.canonical_url,
         )),
-        UrlType::Playlist => Err(
-            "Esta es una URL de playlist. Use el flujo de descarga de playlist.".into(),
-        ),
+        UrlType::Playlist => {
+            Err("Esta es una URL de playlist. Use el flujo de descarga de playlist.".into())
+        }
     }
 }
 
@@ -223,9 +221,7 @@ pub async fn extract_metadata(
         buf
     });
 
-    let stderr_reader = tokio::spawn(async move {
-        read_bounded_string(stderr, 64 * 1024).await
-    });
+    let stderr_reader = tokio::spawn(async move { read_bounded_string(stderr, 64 * 1024).await });
 
     let execution = async {
         tokio::select! {
@@ -255,8 +251,7 @@ pub async fn extract_metadata(
             stderr_content.trim(),
             "No se pudo extraer metadata del vídeo",
         );
-        return Err(serde_json::to_string(&classified)
-            .unwrap_or_else(|_| classified.user_message));
+        return Err(serde_json::to_string(&classified).unwrap_or(classified.user_message));
     }
 
     let json_val: serde_json::Value = serde_json::from_str(&stdout_content)
@@ -299,9 +294,7 @@ pub async fn extract_playlist(
     token: &CancellationToken,
 ) -> Result<PlaylistInfo, String> {
     let validated = validate_youtube_url(url)?;
-    let playlist_id = validated
-        .playlist_id
-        .ok_or("La URL no es una playlist")?;
+    let playlist_id = validated.playlist_id.ok_or("La URL no es una playlist")?;
 
     let ytdlp_path = tool_path(resource_dir, Tool::YtDlp)?;
 
@@ -336,9 +329,7 @@ pub async fn extract_playlist(
         buf
     });
 
-    let stderr_reader = tokio::spawn(async move {
-        read_bounded_string(stderr, 64 * 1024).await
-    });
+    let stderr_reader = tokio::spawn(async move { read_bounded_string(stderr, 64 * 1024).await });
 
     let execution = async {
         tokio::select! {
@@ -364,12 +355,9 @@ pub async fn extract_playlist(
     let stderr_content = stderr_reader.await.unwrap_or_default();
 
     if !exit_status.success() {
-        let classified = errors::classify_ytdlp_error(
-            stderr_content.trim(),
-            "No se pudo extraer la playlist",
-        );
-        return Err(serde_json::to_string(&classified)
-            .unwrap_or_else(|_| classified.user_message));
+        let classified =
+            errors::classify_ytdlp_error(stderr_content.trim(), "No se pudo extraer la playlist");
+        return Err(serde_json::to_string(&classified).unwrap_or(classified.user_message));
     }
 
     let json_val: serde_json::Value = serde_json::from_str(&stdout_content)
@@ -389,10 +377,7 @@ pub async fn extract_playlist(
         .enumerate()
         .filter_map(|(i, entry)| {
             let id = entry["id"].as_str()?.to_string();
-            let entry_title = entry["title"]
-                .as_str()
-                .unwrap_or("Sin título")
-                .to_string();
+            let entry_title = entry["title"].as_str().unwrap_or("Sin título").to_string();
             let artist = entry["uploader"]
                 .as_str()
                 .or_else(|| entry["channel"].as_str())
@@ -486,9 +471,7 @@ where
         }
     });
 
-    let stderr_reader = tokio::spawn(async move {
-        read_bounded_string(stderr, 64 * 1024).await
-    });
+    let stderr_reader = tokio::spawn(async move { read_bounded_string(stderr, 64 * 1024).await });
 
     let execution = async {
         tokio::select! {
@@ -515,12 +498,9 @@ where
     let stderr_content = stderr_reader.await.unwrap_or_default();
 
     if !exit_status.success() {
-        let classified = errors::classify_ytdlp_error(
-            stderr_content.trim(),
-            "Fallo en la descarga de yt-dlp",
-        );
-        return Err(serde_json::to_string(&classified)
-            .unwrap_or_else(|_| classified.user_message));
+        let classified =
+            errors::classify_ytdlp_error(stderr_content.trim(), "Fallo en la descarga de yt-dlp");
+        return Err(serde_json::to_string(&classified).unwrap_or(classified.user_message));
     }
 
     let entries = std::fs::read_dir(temp_dir).map_err(|e| e.to_string())?;

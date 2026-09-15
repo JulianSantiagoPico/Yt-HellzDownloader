@@ -22,11 +22,13 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "ti
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
 id3 = "1"
 url = "2"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 sha2 = "0.10"
 hex = "0.4"
+zip = "2.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -59,9 +59,7 @@ pub async fn convert_to_mp3(
         .stderr
         .take()
         .ok_or("No se pudo capturar stderr de FFmpeg")?;
-    let stderr_reader = tokio::spawn(async move {
-        read_bounded_string(stderr, 64 * 1024).await
-    });
+    let stderr_reader = tokio::spawn(async move { read_bounded_string(stderr, 64 * 1024).await });
 
     let execution = async {
         tokio::select! {
@@ -85,7 +83,10 @@ pub async fn convert_to_mp3(
 
     let stderr_output = stderr_reader.await.unwrap_or_default();
     if !exit_status.success() {
-        return Err(classify_ffmpeg_error(&stderr_output, "FFmpeg falló al convertir a MP3"));
+        return Err(classify_ffmpeg_error(
+            &stderr_output,
+            "FFmpeg falló al convertir a MP3",
+        ));
     }
 
     if !output_mp3.exists() {
@@ -243,9 +244,7 @@ pub async fn validate_mp3(
         out
     });
 
-    let stderr_reader = tokio::spawn(async move {
-        read_bounded_string(stderr, 64 * 1024).await
-    });
+    let stderr_reader = tokio::spawn(async move { read_bounded_string(stderr, 64 * 1024).await });
 
     let execution = async {
         tokio::select! {

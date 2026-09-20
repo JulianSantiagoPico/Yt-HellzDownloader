@@ -13,9 +13,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::processes::{read_bounded_string, spawn_in_job, tool_path, Tool};
+use crate::{
+    domain::states::Availability,
+    processes::{read_bounded_string, spawn_in_job, tool_path, Tool},
+};
 
 pub mod errors;
+#[cfg(test)]
+pub mod fixture_tests;
 
 const ALLOWED_HOSTS: &[&str] = &[
     "youtube.com",
@@ -54,6 +59,7 @@ pub struct PlaylistEntry {
     pub artist: String,
     pub duration_seconds: Option<f64>,
     pub index: usize,
+    pub availability: Availability,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +159,20 @@ pub fn validate_youtube_url(raw_url: &str) -> Result<ValidatedUrl, String> {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err("Identificador de vídeo de YouTube inválido".into());
+    }
+
+    let playlist_id = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "list")
+        .map(|(_, v)| v.to_string());
+
+    if let Some(pl_id) = playlist_id {
+        return Ok(ValidatedUrl {
+            url_type: UrlType::Playlist,
+            video_id: Some(video_id),
+            playlist_id: Some(pl_id),
+            canonical_url: raw_url.trim().to_string(),
+        });
     }
 
     let canonical_url = format!("https://www.youtube.com/watch?v={}", video_id);
@@ -386,6 +406,7 @@ pub async fn extract_playlist(
             let duration = entry["duration"].as_f64();
             let video_url = format!("https://www.youtube.com/watch?v={}", id);
 
+            let availability = Availability::from_ytdlp_title(&entry_title);
             Some(PlaylistEntry {
                 id,
                 url: video_url,
@@ -393,6 +414,7 @@ pub async fn extract_playlist(
                 artist,
                 duration_seconds: duration,
                 index: i + 1,
+                availability,
             })
         })
         .collect();
@@ -402,6 +424,175 @@ pub async fn extract_playlist(
         title,
         entry_count: entries.len(),
         entries,
+    })
+}
+
+/// Extrae la lista de vídeos de una playlist en streaming usando yt-dlp con lectura línea a línea.
+/// Las entradas se emiten progresivamente por el canal `mpsc::Sender<PlaylistEntry>`.
+/// Cuenta con timeout progresivo (30s sin datos) y verificación de cancelación cooperativa.
+pub async fn extract_playlist_streaming(
+    resource_dir: &Path,
+    url: &str,
+    token: &CancellationToken,
+    entry_sender: tokio::sync::mpsc::Sender<PlaylistEntry>,
+) -> Result<PlaylistInfo, String> {
+    let validated = validate_youtube_url(url)?;
+    let playlist_id = validated
+        .playlist_id
+        .ok_or("La URL no es una playlist")?;
+
+    let ytdlp_path = tool_path(resource_dir, Tool::YtDlp)?;
+
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args([
+        "--flat-playlist",
+        "--dump-json",
+        "--no-warnings",
+        &validated.canonical_url,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+
+    let (mut child, job) = spawn_in_job(cmd)?;
+
+    let stdout = child.stdout.take().ok_or("No se pudo capturar stdout")?;
+    let stderr = child.stderr.take().ok_or("No se pudo capturar stderr")?;
+
+    let stderr_reader = tokio::spawn(async move { read_bounded_string(stderr, 64 * 1024).await });
+
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let mut entries_count = 0usize;
+    let mut playlist_title: Option<String> = None;
+
+    loop {
+        if token.is_cancelled() {
+            let _ = job.terminate(1);
+            let _ = child.kill().await;
+            return Err("Operación cancelada".into());
+        }
+
+        line.clear();
+        let read_res = tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                let _ = job.terminate(1);
+                let _ = child.kill().await;
+                return Err("Operación cancelada".into());
+            }
+            res = reader.read_line(&mut line) => res,
+            _ = tokio::time::sleep(Duration::from_secs(120)) => {
+                let _ = job.terminate(1);
+                let _ = child.kill().await;
+                let classified = errors::classify_ytdlp_error("timeout", "Tiempo de espera agotado al obtener la playlist (120s sin datos)");
+                return Err(serde_json::to_string(&classified).unwrap_or(classified.user_message));
+            }
+        };
+
+        match read_res {
+            Ok(0) => break, // Fin de stream (EOF)
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let json_val: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // Advertencias o líneas formateadas no JSON
+                        continue;
+                    }
+                };
+
+                if playlist_title.is_none() {
+                    if let Some(pt) = json_val["playlist_title"]
+                        .as_str()
+                        .or_else(|| json_val["playlist"].as_str())
+                    {
+                        playlist_title = Some(pt.to_string());
+                    }
+                }
+
+                let id = match json_val["id"].as_str().or_else(|| json_val["url"].as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+
+                let entry_title = json_val["title"]
+                    .as_str()
+                    .unwrap_or("Sin título")
+                    .to_string();
+                let artist = json_val["artist"]
+                    .as_str()
+                    .or_else(|| json_val["uploader"].as_str())
+                    .or_else(|| json_val["channel"].as_str())
+                    .unwrap_or("Artista desconocido")
+                    .to_string();
+                let duration = json_val["duration"].as_f64();
+                let video_url = format!("https://www.youtube.com/watch?v={}", id);
+                let availability = Availability::from_ytdlp_title(&entry_title);
+                entries_count += 1;
+
+                let entry = PlaylistEntry {
+                    id,
+                    url: video_url,
+                    title: entry_title,
+                    artist,
+                    duration_seconds: duration,
+                    index: entries_count,
+                    availability,
+                };
+
+                if entry_sender.send(entry).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                let _ = job.terminate(1);
+                let _ = child.kill().await;
+                return Err(format!("Error de lectura en stdout de yt-dlp: {}", e));
+            }
+        }
+    }
+
+    let execution = async {
+        tokio::select! {
+            res = child.wait() => res.map_err(|e| e.to_string()),
+            _ = token.cancelled() => {
+                let _ = job.terminate(1);
+                let _ = child.kill().await;
+                Err("Operación cancelada".into())
+            }
+        }
+    };
+
+    let exit_status = match timeout(Duration::from_secs(10), execution).await {
+        Ok(res) => res?,
+        Err(_) => {
+            let _ = job.terminate(1);
+            let _ = child.kill().await;
+            return Err("Tiempo de espera agotado al finalizar proceso yt-dlp".into());
+        }
+    };
+
+    let stderr_content = stderr_reader.await.unwrap_or_default();
+
+    if !exit_status.success() && entries_count == 0 {
+        let classified = errors::classify_ytdlp_error(
+            stderr_content.trim(),
+            "No se pudo extraer la playlist",
+        );
+        return Err(serde_json::to_string(&classified).unwrap_or(classified.user_message));
+    }
+
+    Ok(PlaylistInfo {
+        playlist_id,
+        title: playlist_title.unwrap_or_else(|| "Playlist".to_string()),
+        entry_count: entries_count,
+        entries: Vec::new(),
     })
 }
 
@@ -596,14 +787,50 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_and_normalize_youtube_music_url_with_list_param() {
-        // Caso exacto del diagnóstico: URL de YouTube Music con parámetro list
-        let (id, canonical) = validate_and_normalize_youtube_url(
+    fn test_validate_youtube_url_mixed_url() {
+        // En Fase 3, URLs mixtas (watch + list) se tratan como Playlist preservando video_id y playlist_id
+        let result = validate_youtube_url(
             "https://music.youtube.com/watch?v=UnnwqBV5YWk&list=RDAMVMr46x3JsGhLc",
         )
         .unwrap();
-        assert_eq!(id, "UnnwqBV5YWk");
-        assert_eq!(canonical, "https://www.youtube.com/watch?v=UnnwqBV5YWk");
+        assert_eq!(result.url_type, UrlType::Playlist);
+        assert_eq!(result.video_id.as_deref(), Some("UnnwqBV5YWk"));
+        assert_eq!(
+            result.playlist_id.as_deref(),
+            Some("RDAMVMr46x3JsGhLc")
+        );
+
+        let yt_mixed = validate_youtube_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf",
+        )
+        .unwrap();
+        assert_eq!(yt_mixed.url_type, UrlType::Playlist);
+        assert_eq!(yt_mixed.video_id.as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(
+            yt_mixed.playlist_id.as_deref(),
+            Some("PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+        );
+    }
+
+    #[test]
+    fn test_availability_classification() {
+        assert_eq!(
+            Availability::from_ytdlp_title("[Private video]"),
+            Availability::Private
+        );
+        assert_eq!(
+            Availability::from_ytdlp_title("[Deleted video]"),
+            Availability::Deleted
+        );
+        assert_eq!(
+            Availability::from_ytdlp_title("  [Private video]  "),
+            Availability::Private
+        );
+        assert_eq!(
+            Availability::from_ytdlp_title("Cool Song Title"),
+            Availability::Available
+        );
+        assert_eq!(Availability::from_ytdlp_title(""), Availability::Available);
     }
 
     #[test]

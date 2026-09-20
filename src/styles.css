@@ -364,3 +364,242 @@ button:disabled {
   border-left: 3px solid #ef4444;
   padding-left: 10px;
 }
+
+/* Virtualized Table Styles */
+.virtual-table-wrapper {
+  margin-top: 20px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+}
+
+.table-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.table-stats {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.selection-badge {
+  background: #0284c725;
+  color: #38bdf8;
+  border: 1px solid #0284c7;
+}
+
+.filter-badge {
+  background: #334155;
+  color: #cbd5e1;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button.small {
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  border-radius: 6px;
+}
+
+.virtual-grid-container {
+  height: 420px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  outline: none;
+}
+
+.virtual-grid-container:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 1px #38bdf8;
+}
+
+.grid-header {
+  display: grid;
+  grid-template-columns: 44px 44px 1fr 180px 80px 140px;
+  background: #1e293b;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid #334155;
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.grid-row {
+  display: grid;
+  grid-template-columns: 44px 44px 1fr 180px 80px 140px;
+  align-items: center;
+  border-bottom: 1px solid #1e293b;
+  font-size: 0.88rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s ease;
+}
+
+.grid-row:hover {
+  background: #1e293b80;
+}
+
+.grid-row.selected {
+  background: #0284c720;
+}
+
+.grid-row.focused {
+  outline: 1px solid #38bdf8;
+  outline-offset: -1px;
+}
+
+.grid-row.unavailable {
+  opacity: 0.65;
+}
+
+.grid-cell {
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  box-sizing: border-box;
+}
+
+.select-cell {
+  justify-content: center;
+}
+
+.pos-cell {
+  color: #64748b;
+  font-size: 0.8rem;
+  justify-content: center;
+}
+
+.cell-truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.title-cell {
+  font-weight: 500;
+  color: #f1f5f9;
+}
+
+.artist-cell {
+  color: #94a3b8;
+}
+
+.duration-cell {
+  color: #64748b;
+  font-family: monospace;
+  font-size: 0.82rem;
+}
+
+.availability-pill {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.avail-ok {
+  background: #10b98120;
+  color: #34d399;
+}
+
+.avail-private {
+  background: #8b5cf620;
+  color: #a78bfa;
+}
+
+.avail-deleted {
+  background: #64748b25;
+  color: #94a3b8;
+}
+
+.avail-geoblocked {
+  background: #3b82f620;
+  color: #60a5fa;
+}
+
+.status-indicator {
+  color: #38bdf8;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.empty-virtual-grid {
+  padding: 40px 20px;
+  text-align: center;
+  color: #64748b;
+}
+
+/* Discovery Progress Styles */
+.discovery-stats {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin-top: 4px;
+  display: block;
+}
+
+.avail-badge {
+  color: #34d399;
+}
+
+.unavail-badge {
+  color: #f87171;
+}
+
+.discovery-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.danger-hover:hover {
+  background: #dc2626 !important;
+  color: #ffffff !important;
+}
+
+.progress-fill.indeterminate {
+  width: 100% !important;
+  animation: indeterminate-bar 1.5s infinite linear;
+  background: linear-gradient(90deg, #0284c7 0%, #38bdf8 50%, #0284c7 100%);
+  background-size: 200% 100%;
+}
+
+@keyframes indeterminate-bar {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.filter-input-container {
+  margin-bottom: 12px;
+}
+

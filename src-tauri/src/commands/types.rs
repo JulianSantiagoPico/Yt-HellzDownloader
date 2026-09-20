@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::domain::entities::{Playlist, Track};
+use crate::domain::entities::{JobItem, Playlist, Track};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +37,22 @@ pub struct PlaylistTrackWithStatus {
     pub track: Track,
     pub position: u32,
     pub download_status: Option<String>,
+    pub progress_percent: Option<f32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobItemWithTrack {
+    pub item: JobItem,
+    pub track: Option<Track>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginatedJobItems {
+    pub items: Vec<JobItemWithTrack>,
+    pub total: u32,
+    pub has_more: bool,
 }
 
 #[derive(Serialize)]

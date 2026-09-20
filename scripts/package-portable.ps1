@@ -8,7 +8,7 @@ Remove-Item $Out -Recurse -Force -ErrorAction SilentlyContinue
 $PortableBin = Join-Path $Out "binaries"
 New-Item -ItemType Directory -Force $Out, $PortableBin | Out-Null
 $Src = Join-Path $Root "src-tauri\target\release\yt-playlist-downloader.exe"
-$Dst = Join-Path $Out "yt-playlist-downloader.exe"
+$Dst = Join-Path $Out "YT Playlist Downloader.exe"
 Get-Process yt-playlist-downloader -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     try { Copy-Item $Src $Dst; break } catch {
@@ -19,7 +19,7 @@ for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
 Copy-Item (Join-Path $Root "src-tauri\binaries\*.exe") $PortableBin
 Copy-Item (Join-Path $Root "src-tauri\binaries\sidecars.json") $PortableBin
 Copy-Item (Join-Path $Root "docs\THIRD_PARTY_NOTICES.md") $Out
-$Archive = Join-Path $Root "artifacts\YT-Playlist-Downloader-portable.zip"
+$Archive = Join-Path $Root "artifacts\YT-Playlist-Downloader-v0.2.0-portable.zip"
 for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
     try {
         Compress-Archive (Join-Path $Out "\*") $Archive -Force

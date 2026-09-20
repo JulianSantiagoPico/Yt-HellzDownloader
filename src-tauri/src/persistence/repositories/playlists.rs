@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::domain::{
     entities::{Playlist, PlaylistTrack, Track},
-    states::SourceKind,
+    states::{Availability, SourceKind},
 };
 
 pub async fn upsert_playlist(
@@ -154,6 +154,12 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<String, sq
 }
 
 fn map_track_row(r: &sqlx::sqlite::SqliteRow) -> Track {
+    let availability_str: Option<String> = r.try_get("availability").ok();
+    let availability = availability_str
+        .as_deref()
+        .and_then(|s| Availability::from_str(s).ok())
+        .unwrap_or(Availability::Available);
+
     Track {
         id: r.get("id"),
         youtube_video_id: r.get("youtube_video_id"),
@@ -164,7 +170,7 @@ fn map_track_row(r: &sqlx::sqlite::SqliteRow) -> Track {
         published_at: r.get("published_at"),
         duration_seconds: r.get("duration_seconds"),
         thumbnail_url: r.get("thumbnail_url"),
-        availability: r.get("availability"),
+        availability,
         metadata: r.get("metadata"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),

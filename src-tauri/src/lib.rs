@@ -10,6 +10,7 @@ pub mod scheduler;
 pub mod updater;
 pub mod youtube;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use scheduler::DownloadScheduler;
@@ -17,6 +18,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use std::sync::Mutex;
 use tauri::{Manager, State};
+use tokio_util::sync::CancellationToken;
 
 use processes::ProcessRegistry;
 
@@ -26,6 +28,7 @@ pub struct AppState {
     pub processes: ProcessRegistry,
     pub initial_recovery_report: Mutex<persistence::RecoveryReport>,
     pub scheduler: Arc<DownloadScheduler>,
+    pub cancellation_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 #[derive(Serialize)]
@@ -91,6 +94,7 @@ pub fn run() {
                 processes: ProcessRegistry::default(),
                 initial_recovery_report: Mutex::new(recovery_report),
                 scheduler,
+                cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })
@@ -109,6 +113,7 @@ pub fn run() {
             // Playlist commands
             commands::list_playlists,
             commands::get_playlist_details,
+            commands::get_job_items_paginated,
             commands::get_local_files,
             commands::resolve_file_conflicts,
             // Diagnostic commands

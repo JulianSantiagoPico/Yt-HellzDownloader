@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::states::{
-        JobItemStatus, JobKind, JobStatus, OrganizationMode, SourceKind, ValidationStatus,
+        Availability, JobItemStatus, JobKind, JobStatus, OrganizationMode, SourceKind,
+        ValidationStatus,
     },
     filesystem::ExistingFilePolicy,
 };
@@ -35,7 +36,7 @@ pub struct Track {
     pub published_at: Option<String>,
     pub duration_seconds: Option<f64>,
     pub thumbnail_url: Option<String>,
-    pub availability: String,
+    pub availability: Availability,
     pub metadata: Option<String>,
     pub created_at: String,
     pub updated_at: String,

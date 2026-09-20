@@ -22,6 +22,9 @@ pub enum AppEvent {
         job_id: String,
         processed: u32,
         total: u32,
+        total_discovered: u32,
+        available: u32,
+        unavailable: u32,
     },
 }
 

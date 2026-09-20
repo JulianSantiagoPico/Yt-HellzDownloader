@@ -323,3 +323,65 @@ impl FromStr for OrganizationMode {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
+pub enum Availability {
+    Available,
+    Private,
+    Deleted,
+    GeoBlocked,
+    Unknown,
+}
+
+impl Availability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Private => "private",
+            Self::Deleted => "deleted",
+            Self::GeoBlocked => "geo_blocked",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_ytdlp_title(title: &str) -> Self {
+        match title.trim() {
+            "[Private video]" => Self::Private,
+            "[Deleted video]" => Self::Deleted,
+            _ => Self::Available,
+        }
+    }
+}
+
+impl Default for Availability {
+    fn default() -> Self {
+        Self::Available
+    }
+}
+
+impl fmt::Display for Availability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for Availability {
+    type Err = ParseStatusError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "available" => Ok(Self::Available),
+            "private" => Ok(Self::Private),
+            "deleted" => Ok(Self::Deleted),
+            "geo_blocked" => Ok(Self::GeoBlocked),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(ParseStatusError(format!(
+                "Availability desconocida: {}",
+                other
+            ))),
+        }
+    }
+}
+

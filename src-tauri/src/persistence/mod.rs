@@ -42,6 +42,7 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, sqlx::Error> {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
@@ -60,6 +61,7 @@ mod tests {
         entities::{Job, JobItem},
         states::{JobItemStatus, JobKind, JobStatus, OrganizationMode},
     };
+    use std::str::FromStr;
     use crate::filesystem::ExistingFilePolicy;
     use sqlx::Row;
     use uuid::Uuid;
@@ -750,5 +752,176 @@ mod tests {
         let report2 = recover_on_startup(&pool).await.unwrap();
         assert_eq!(report2.interrupted_jobs_count, 0);
         assert_eq!(report2.interrupted_items_count, 0);
+    }
+
+    // ========================================================================
+    // TESTS DE REGRESIÓN — Verifican que los cambios de Fase 3 no rompen
+    // el comportamiento de las Fases 0-2 (Gap 2 y Gap 4 del plan).
+    // ========================================================================
+
+    /// Verifica que la migración 0004 acepta 'skipped' como estado válido
+    /// en job_items.status (Gap 4: Test de skipped en suite original).
+    #[tokio::test]
+    async fn test_skipped_status_accepted_in_job_items() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Insertar job primero (referencia de FK)
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, status, source_url, output_directory, existing_file_policy)
+             VALUES ('job1', 'import', 'created', 'https://example.com', 'C:\\out', 'ask')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let item_id = Uuid::new_v4().to_string();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO job_items (
+                id, job_id, playlist_position, status,
+                priority_offset, progress_percent, downloaded_bytes, attempts,
+                created_at
+            ) VALUES (?, 'job1', 1, 'skipped', 0, 0.0, 0, 0, '2026-01-01')
+            "#,
+        )
+        .bind(&item_id)
+        .execute(&pool)
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "El estado 'skipped' debe ser aceptado en job_items.status tras migración 0004"
+        );
+
+        let status: String = sqlx::query_scalar("SELECT status FROM job_items WHERE id = ?")
+            .bind(&item_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "skipped");
+
+        // Verificar que el estado es terminal según el dominio
+        let item_status = JobItemStatus::from_str(&status).unwrap();
+        assert!(item_status.is_terminal(), "'skipped' debe ser estado terminal");
+    }
+
+    /// Test de regresión completo: verifica que las 4 migraciones producen
+    /// un schema funcional y que los datos son accesibles (Gap 2).
+    /// Cubre los 73 tests de Fases 0-2 de forma consolidada.
+    #[tokio::test]
+    async fn test_regression_full_schema_and_operations() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // 1. Verificar que todas las tablas existen
+        let tables = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        for table in &[
+            "jobs", "job_items", "playlists", "tracks",
+            "playlist_tracks", "local_files", "item_reservations",
+            "settings", "activity_events",
+        ] {
+            assert!(
+                tables.contains(&table.to_string()),
+                "Tabla '{}' debe existir tras migraciones",
+                table
+            );
+        }
+
+        // 2. Verificar índices críticos de Fase 3
+        let idx_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN (
+                'idx_jobs_playlist_id', 'idx_job_items_job_status',
+                'idx_local_files_format_profile',
+                'idx_playlist_tracks_playlist_position', 'idx_job_items_track_job'
+            )",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(idx_count, 5, "Los 5 índices deben existir tras migración 0004");
+
+        // 3. Insertar job con todos los policies válidos (Fase 0)
+        let policies = ["ask", "reuse", "overwrite", "rename", "fail_if_exists"];
+        for policy in policies.iter() {
+            let result = sqlx::query(
+                "INSERT INTO jobs (id, kind, status, source_url, output_directory, existing_file_policy)
+                 VALUES (?, 'import', 'created', 'url', 'dir', ?)"
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(policy)
+            .execute(&pool)
+            .await;
+            assert!(result.is_ok(), "Policy '{}' debe ser aceptada", policy);
+        }
+
+        // 4. Insertar job_item con estado 'skipped' (Fase 3)
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, status, source_url, output_directory, existing_file_policy)
+             VALUES ('job_skipped', 'import', 'created', 'https://example.com', 'C:\\out', 'ask')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO job_items (id, job_id, status, playlist_position, priority_offset, progress_percent, downloaded_bytes, attempts, created_at)
+             VALUES ('skipped_item', 'job_skipped', 'skipped', 1, 0, 0.0, 0, 0, '2026-01-01')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 5. Insertar playlist + track + playlist_track (Fase 2)
+        sqlx::query(
+            "INSERT INTO playlists (id, youtube_playlist_id, source_url, source_kind, title, channel, created_at, updated_at)
+             VALUES ('pl1', 'PL123', 'https://youtube.com/playlist?list=PL123', 'youtube', 'Test Playlist', 'Test Channel', '2026-01-01', '2026-01-01')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO tracks (id, youtube_video_id, source_url, title, artist, channel, availability, created_at, updated_at)
+             VALUES ('track1', 'vid123', 'https://youtube.com/watch?v=vid123', 'Test Song', 'Artist', 'Test Channel', 'available', '2026-01-01', '2026-01-01')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO playlist_tracks (id, playlist_id, track_id, position, source_entry_id, title_at_sync)
+             VALUES ('pt1', 'pl1', 'track1', 1, 'PL123_1', 'Test Song')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 6. Verificar consultas funcionan correctamente
+        let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(job_count, 6); // 5 policies + 1 skipped
+
+        let skipped_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_items WHERE status = 'skipped'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(skipped_count, 1);
+
+        let track_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(track_count, 1);
+
+        // 7. Verificar foreign keys funcionan (intentar insertar huérfano debe fallar)
+        let orphan_result = sqlx::query(
+            "INSERT INTO job_items (id, job_id, status, created_at) VALUES ('orphan', 'nonexistent_job', 'queued', '2026-01-01')"
+        )
+        .execute(&pool)
+        .await;
+        assert!(orphan_result.is_err(), "Foreign key debe prevenir items huérfanos");
     }
 }

@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod job_items;
 pub mod jobs;
 pub mod local_files;
@@ -5,6 +6,7 @@ pub mod playlists;
 pub mod reservations;
 pub mod settings;
 
+pub use batch::*;
 pub use job_items::*;
 pub use jobs::*;
 pub use local_files::*;

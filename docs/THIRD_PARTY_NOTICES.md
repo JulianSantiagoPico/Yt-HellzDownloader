@@ -31,3 +31,18 @@ Este proyecto redistribuye herramientas de terceros bajo sus respectivas licenci
 
 - **Licencia**: Dominio Público (Public Domain).
 - **Sitio oficial**: [https://www.sqlite.org/](https://www.sqlite.org/)
+
+---
+
+## 4. @tanstack/react-virtual
+
+- **Licencia**: MIT
+- **Repositorio**: [https://github.com/TanStack/virtual](https://github.com/TanStack/virtual)
+- **Uso**: Virtualización de listas para la tabla de playlists (renderizado eficiente de hasta 5.000 elementos).
+
+---
+
+## 5. React
+
+- **Licencia**: MIT
+- **Repositorio**: [https://github.com/facebook/react](https://github.com/facebook/react)

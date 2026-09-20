@@ -9,21 +9,20 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::commands::types::{
-    CurrentItem, ExportResult, ExtractionResult, JobProgress, PlaylistDetails, PlaylistSummary,
-    PlaylistTrackWithStatus, QueueEntry,
+    CurrentItem, ExportResult, ExtractionResult, JobItemWithTrack, JobProgress, PaginatedJobItems,
+    PlaylistDetails, PlaylistSummary, PlaylistTrackWithStatus, QueueEntry,
 };
 use crate::domain::entities::{
-    AppSettings, Job, JobItem, LocalFile, Playlist, PlaylistTrack, Track,
+    AppSettings, Job, JobItem, LocalFile, Playlist, Track,
 };
-use crate::domain::states::{JobItemStatus, JobKind, JobStatus, OrganizationMode, SourceKind};
+use crate::domain::states::{Availability, JobItemStatus, JobKind, JobStatus, OrganizationMode, SourceKind};
 use crate::error::CommandError;
 use crate::events::{emit_event, AppEvent};
 use crate::persistence::repositories::jobs::{self, transition_job_status};
 use crate::persistence::repositories::{self as repo, settings};
 use crate::persistence::repositories::{
-    add_playlist_track, get_active_playlist_tracks, get_playlist as repo_get_playlist,
+    get_active_playlist_tracks, get_playlist as repo_get_playlist,
     get_playlist_by_youtube_id, list_playlists as repo_list_playlists, upsert_playlist,
-    upsert_track,
 };
 use crate::youtube;
 use crate::{filesystem::ExistingFilePolicy, AppState};
@@ -186,29 +185,26 @@ pub async fn extract_and_enqueue_items(
             message: format!("Error de ruta de recursos: {}", e),
         })?;
 
-    // 4. Extraer playlist
-    let token = tokio_util::sync::CancellationToken::new();
-    let playlist_info = youtube::extract_playlist(&resource_dir, &job.source_url, &token)
-        .await
-        .map_err(|msg| CommandError::Internal {
-            message: format!("Error al extraer playlist: {}", msg),
-        })?;
-
-    // 5. Crear/actualizar playlist con metadata
-    let now = Utc::now().to_rfc3339();
-    let playlist_id = playlist_info.playlist_id.clone();
+    // 4. Validar URL y crear registro inicial de playlist
+    let validated = youtube::validate_youtube_url(&job.source_url)
+        .map_err(|msg| CommandError::Validation { message: msg })?;
+    let yt_playlist_id = validated
+        .playlist_id
+        .clone()
+        .unwrap_or_else(|| "unknown_playlist".to_string());
     let source_kind = if job.source_url.contains("music.youtube.com") {
         SourceKind::YouTubeMusic
     } else {
         SourceKind::YouTube
     };
 
-    let playlist = Playlist {
+    let now = Utc::now().to_rfc3339();
+    let initial_playlist = Playlist {
         id: Uuid::new_v4().to_string(),
-        youtube_playlist_id: playlist_id.clone(),
+        youtube_playlist_id: yt_playlist_id.clone(),
         source_url: job.source_url.clone(),
         source_kind,
-        title: playlist_info.title.clone(),
+        title: "Extrayendo playlist...".to_string(),
         channel: String::new(),
         thumbnail_url: None,
         default_output_directory: Some(job.output_directory.clone()),
@@ -216,93 +212,156 @@ pub async fn extract_and_enqueue_items(
         created_at: now.clone(),
         updated_at: now.clone(),
     };
-    let actual_playlist_id = upsert_playlist(&state.pool, &playlist).await?;
+    let actual_playlist_id = upsert_playlist(&state.pool, &initial_playlist).await?;
 
-    // 6. Procesar entradas en lotes
-    let mut total: u32 = 0;
-    let mut available: u32 = 0;
-    let batch_size = 50;
+    let _ = sqlx::query("UPDATE jobs SET playlist_id = ? WHERE id = ?")
+        .bind(&actual_playlist_id)
+        .bind(&job_id)
+        .execute(&state.pool)
+        .await;
 
-    for chunk in playlist_info.entries.chunks(batch_size) {
-        for entry in chunk {
-            total += 1;
+    // 5. Configurar canal de streaming y registrar token de cancelación en AppState
+    let (entry_tx, mut entry_rx) = tokio::sync::mpsc::channel::<youtube::PlaylistEntry>(100);
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancellation_tokens
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), token.clone());
 
-            // Crear/actualizar Track
-            let track = Track {
-                id: Uuid::new_v4().to_string(),
-                youtube_video_id: entry.id.clone(),
-                source_url: entry.url.clone(),
-                title: entry.title.clone(),
-                artist: entry.artist.clone(),
-                channel: String::new(),
-                published_at: None,
-                duration_seconds: entry.duration_seconds,
-                thumbnail_url: None,
-                availability: "available".into(),
-                metadata: None,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            };
-            let actual_track_id = upsert_track(&state.pool, &track).await?;
+    let resource_dir_clone = resource_dir.clone();
+    let source_url_clone = job.source_url.clone();
+    let token_clone = token.clone();
 
-            // Crear PlaylistTrack
-            let playlist_track = PlaylistTrack {
-                id: Uuid::new_v4().to_string(),
-                playlist_id: actual_playlist_id.clone(),
-                track_id: actual_track_id.clone(),
-                position: entry.index as i32,
-                source_entry_id: Some(entry.id.clone()),
-                title_at_sync: entry.title.clone(),
-                discovered_at: now.clone(),
-                removed_at: None,
-            };
-            add_playlist_track(&state.pool, &playlist_track).await?;
+    let extract_task = tokio::spawn(async move {
+        youtube::extract_playlist_streaming(
+            &resource_dir_clone,
+            &source_url_clone,
+            &token_clone,
+            entry_tx,
+        )
+        .await
+    });
 
-            // Crear JobItem
-            let job_item = JobItem {
-                id: Uuid::new_v4().to_string(),
-                job_id: job_id.clone(),
-                track_id: Some(actual_track_id.clone()),
-                playlist_track_id: Some(playlist_track.id),
-                playlist_position: Some(entry.index as i32),
-                status: JobItemStatus::Queued,
-                priority_offset: 0,
-                progress_percent: Some(0.0),
-                downloaded_bytes: Some(0),
-                estimated_total_bytes: None,
-                attempts: 0,
-                next_attempt_at: None,
-                temporary_path: None,
-                output_path: None,
-                error_code: None,
-                error_message: None,
-                execution_lease_expires_at: None,
-                created_at: now.clone(),
-                started_at: None,
-                completed_at: None,
-            };
-            repo::job_items::create_job_item(&state.pool, &job_item).await?;
+    // 5b. Soft-delete playlist_tracks activos existentes para esta playlist,
+    // para evitar que el ON CONFLICT parcial descarte los pt_ids generados
+    // y provoque FOREIGN KEY violations en job_items.
+    sqlx::query(
+        "UPDATE playlist_tracks SET removed_at = ? WHERE playlist_id = ? AND removed_at IS NULL",
+    )
+    .bind(&now)
+    .bind(&actual_playlist_id)
+    .execute(&state.pool)
+    .await?;
 
-            available += 1;
+    // 6. Consumir stream y persistir en lotes transaccionales de 50
+    let mut chunk = Vec::with_capacity(50);
+    let mut total_discovered: u32 = 0;
+    let mut total_available: u32 = 0;
+    let mut total_unavailable: u32 = 0;
+
+    while let Some(entry) = entry_rx.recv().await {
+        chunk.push(entry);
+        if chunk.len() >= 50 {
+            let batch_now = Utc::now().to_rfc3339();
+            let batch_res = repo::batch::batch_insert_playlist_items(
+                &state.pool,
+                &chunk,
+                &job_id,
+                &actual_playlist_id,
+                &batch_now,
+            )
+            .await?;
+
+            total_discovered += batch_res.tracks_inserted;
+            total_available += batch_res.available;
+            total_unavailable += batch_res.unavailable;
+            chunk.clear();
+
+            let _ = emit_event(
+                &app,
+                &AppEvent::ExtractionProgress {
+                    job_id: job_id.clone(),
+                    processed: total_available,
+                    total: total_discovered,
+                    total_discovered,
+                    available: total_available,
+                    unavailable: total_unavailable,
+                },
+            );
         }
+    }
 
-        // Emitir progreso
+    // Persistir remanente final
+    if !chunk.is_empty() {
+        let batch_now = Utc::now().to_rfc3339();
+        let batch_res = repo::batch::batch_insert_playlist_items(
+            &state.pool,
+            &chunk,
+            &job_id,
+            &actual_playlist_id,
+            &batch_now,
+        )
+        .await?;
+
+        total_discovered += batch_res.tracks_inserted;
+        total_available += batch_res.available;
+        total_unavailable += batch_res.unavailable;
+        chunk.clear();
+
         let _ = emit_event(
             &app,
             &AppEvent::ExtractionProgress {
                 job_id: job_id.clone(),
-                processed: available,
-                total: playlist_info.entry_count as u32,
+                processed: total_available,
+                total: total_discovered,
+                total_discovered,
+                available: total_available,
+                unavailable: total_unavailable,
             },
         );
     }
 
-    // 7. Asociar playlist_id al job
-    sqlx::query("UPDATE jobs SET playlist_id = ? WHERE id = ?")
+    // Esperar término de la tarea de extracción
+    let extract_outcome = extract_task
+        .await
+        .map_err(|e| CommandError::Internal {
+            message: format!("Error en tarea de extracción: {}", e),
+        })?;
+
+    // Limpiar token del registro
+    state.cancellation_tokens.lock().unwrap().remove(&job_id);
+
+    if token.is_cancelled() {
+        return Err(CommandError::InvalidState {
+            message: "Extracción cancelada por el usuario".into(),
+        });
+    }
+
+    let playlist_info = match extract_outcome {
+        Ok(info) => info,
+        Err(e) => {
+            if total_discovered > 0 {
+                youtube::PlaylistInfo {
+                    playlist_id: yt_playlist_id,
+                    title: "Playlist parcial".to_string(),
+                    entry_count: total_discovered as usize,
+                    entries: Vec::new(),
+                }
+            } else {
+                return Err(CommandError::Internal {
+                    message: format!("Error al extraer playlist: {}", e),
+                });
+            }
+        }
+    };
+
+    // 7. Actualizar título real de la playlist
+    let _ = sqlx::query("UPDATE playlists SET title = ? WHERE id = ?")
+        .bind(&playlist_info.title)
         .bind(&actual_playlist_id)
-        .bind(&job_id)
         .execute(&state.pool)
-        .await?;
+        .await;
 
     // 8. Transicionar a Queued
     transition_job_status(&state.pool, &job_id, JobStatus::Queued, None).await?;
@@ -316,13 +375,13 @@ pub async fn extract_and_enqueue_items(
         },
     );
 
-    // Notificar al scheduler que hay items nuevos
+    // Notificar al scheduler que hay items nuevos listos
     state.scheduler.notify_new_items();
 
     Ok(ExtractionResult {
-        total,
-        available,
-        unavailable: 0,
+        total: total_discovered,
+        available: total_available,
+        unavailable: total_unavailable,
         playlist_id: actual_playlist_id,
     })
 }
@@ -490,6 +549,11 @@ pub async fn cancel_job(
     }
 
     let previous_status = job.status.as_str().to_string();
+
+    // Abortar token de extracción si el job está extrayendo
+    if let Some(token) = state.cancellation_tokens.lock().unwrap().remove(&job_id) {
+        token.cancel();
+    }
 
     // Transicionar a Cancelling
     transition_job_status(
@@ -795,6 +859,7 @@ pub async fn list_playlists(
 #[tauri::command]
 pub async fn get_playlist_details(
     state: State<'_, AppState>,
+    job_id: Option<String>,
     playlist_id: String,
     offset: Option<u32>,
     limit: Option<u32>,
@@ -806,45 +871,210 @@ pub async fn get_playlist_details(
                 message: format!("Playlist '{}' no encontrada", playlist_id),
             })?;
 
-    let all_tracks = get_active_playlist_tracks(&state.pool, &playlist_id).await?;
-    let total = all_tracks.len() as u32;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ? AND removed_at IS NULL",
+    )
+    .bind(&playlist_id)
+    .fetch_one(&state.pool)
+    .await?;
 
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(100);
 
-    let paginated: Vec<PlaylistTrack> = all_tracks
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .collect();
+    let rows = sqlx::query(
+        r#"
+        SELECT pt.position,
+               t.id as t_id, t.youtube_video_id, t.source_url as t_url, t.title as t_title,
+               t.artist as t_artist, t.channel as t_channel, t.published_at, t.duration_seconds,
+               t.thumbnail_url as t_thumbnail, t.availability, t.metadata, t.created_at as t_created, t.updated_at as t_updated,
+               ji.status as download_status, ji.progress_percent
+        FROM playlist_tracks pt
+        JOIN tracks t ON pt.track_id = t.id
+        LEFT JOIN job_items ji ON ji.track_id = t.id AND (? IS NULL OR ji.job_id = ?)
+        WHERE pt.playlist_id = ? AND pt.removed_at IS NULL
+        ORDER BY pt.position ASC
+        LIMIT ? OFFSET ?
+        "#,
+    )
+    .bind(&job_id)
+    .bind(&job_id)
+    .bind(&playlist_id)
+    .bind(limit as i64)
+    .bind(offset as i64)
+    .fetch_all(&state.pool)
+    .await?;
 
-    let mut tracks_with_status = Vec::new();
-    for pt in paginated {
-        let track = repo::playlists::get_track(&state.pool, &pt.track_id)
-            .await?
-            .ok_or(CommandError::NotFound {
-                message: format!("Track '{}' no encontrado", pt.track_id),
-            })?;
+    let mut tracks_with_status = Vec::with_capacity(rows.len());
+    for r in rows {
+        let availability_str: Option<String> = r.try_get("availability").ok();
+        let availability = availability_str
+            .as_deref()
+            .and_then(|s| crate::domain::states::Availability::from_str(s).ok())
+            .unwrap_or(crate::domain::states::Availability::Available);
 
-        // Verificar si hay un job_item activo para este track
-        let download_status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM job_items WHERE track_id = ? AND job_id IN (SELECT id FROM jobs WHERE status NOT IN ('completed', 'cancelled', 'failed')) LIMIT 1"
-        )
-        .bind(&pt.track_id)
-        .fetch_optional(&state.pool)
-        .await?;
+        let track = Track {
+            id: r.get("t_id"),
+            youtube_video_id: r.get("youtube_video_id"),
+            source_url: r.get("t_url"),
+            title: r.get("t_title"),
+            artist: r.get("t_artist"),
+            channel: r.get("t_channel"),
+            published_at: r.get("published_at"),
+            duration_seconds: r.get("duration_seconds"),
+            thumbnail_url: r.get("t_thumbnail"),
+            availability,
+            metadata: r.get("metadata"),
+            created_at: r.get("t_created"),
+            updated_at: r.get("t_updated"),
+        };
+
+        let position: i32 = r.get("position");
+        let download_status: Option<String> = r.get("download_status");
+        let progress_percent: Option<f32> = r.get("progress_percent");
 
         tracks_with_status.push(PlaylistTrackWithStatus {
             track,
-            position: pt.position as u32,
+            position: position as u32,
             download_status,
+            progress_percent,
         });
     }
 
     Ok(PlaylistDetails {
         playlist,
         tracks: tracks_with_status,
-        total,
+        total: total as u32,
+    })
+}
+
+/// Obtiene los items de un Job de forma paginada con filtrado opcional de estado.
+#[tauri::command]
+pub async fn get_job_items_paginated(
+    state: State<'_, AppState>,
+    job_id: String,
+    offset: Option<u32>,
+    limit: Option<u32>,
+    status_filter: Option<String>,
+) -> Result<PaginatedJobItems, CommandError> {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(50);
+
+    // Build WHERE clause for optional status filter
+    let where_clause = match &status_filter {
+        Some(status) if !status.trim().is_empty() => {
+            "WHERE ji.job_id = ? AND ji.status = ?"
+        }
+        _ => "WHERE ji.job_id = ?",
+    };
+
+    // Calculate total with COUNT(*)
+    let total: i64 = match &status_filter {
+        Some(status) if !status.trim().is_empty() => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = ?")
+                .bind(&job_id)
+                .bind(status.trim())
+                .fetch_one(&state.pool)
+                .await?
+        }
+        _ => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM job_items WHERE job_id = ?")
+                .bind(&job_id)
+                .fetch_one(&state.pool)
+                .await?
+        }
+    };
+
+    // Fetch paginated items with JOIN to tracks in SQL
+    let query_str = format!(
+        r#"
+        SELECT 
+            ji.id, ji.job_id, ji.track_id, ji.playlist_track_id, ji.playlist_position,
+            ji.status, ji.priority_offset, ji.progress_percent, ji.downloaded_bytes,
+            ji.estimated_total_bytes, ji.attempts, ji.next_attempt_at, ji.temporary_path,
+            ji.output_path, ji.error_code, ji.error_message, ji.execution_lease_expires_at,
+            ji.created_at, ji.started_at, ji.completed_at,
+            t.id as t_id, t.youtube_video_id, t.source_url, t.title, t.artist, t.channel,
+            t.published_at, t.duration_seconds, t.thumbnail_url, t.availability,
+            t.metadata, t.created_at as t_created_at, t.updated_at as t_updated_at
+        FROM job_items ji
+        LEFT JOIN tracks t ON ji.track_id = t.id
+        {}
+        ORDER BY ji.playlist_position ASC, ji.created_at ASC
+        LIMIT ? OFFSET ?
+        "#,
+        where_clause
+    );
+
+    let mut query = sqlx::query(&query_str).bind(&job_id);
+    if let Some(status) = &status_filter {
+        if !status.trim().is_empty() {
+            query = query.bind(status.trim());
+        }
+    }
+    let query = query.bind(limit as i64).bind(offset as i64);
+
+    let rows = query.fetch_all(&state.pool).await?;
+
+    let items_with_track: Vec<JobItemWithTrack> = rows
+        .iter()
+        .map(|r| {
+            let item = JobItem {
+                id: r.get("id"),
+                job_id: r.get("job_id"),
+                track_id: r.get("track_id"),
+                playlist_track_id: r.get("playlist_track_id"),
+                playlist_position: r.get("playlist_position"),
+                status: JobItemStatus::from_str(&r.get::<String, _>("status"))
+                    .unwrap_or(JobItemStatus::Pending),
+                priority_offset: r.get("priority_offset"),
+                progress_percent: r.get("progress_percent"),
+                downloaded_bytes: r.get("downloaded_bytes"),
+                estimated_total_bytes: r.get("estimated_total_bytes"),
+                attempts: r.get("attempts"),
+                next_attempt_at: r.get("next_attempt_at"),
+                temporary_path: r.get("temporary_path"),
+                output_path: r.get("output_path"),
+                error_code: r.get("error_code"),
+                error_message: r.get("error_message"),
+                execution_lease_expires_at: r.get("execution_lease_expires_at"),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+            };
+
+            let track = if r.get::<Option<String>, _>("t_id").is_some() {
+                Some(Track {
+                    id: r.get("t_id"),
+                    youtube_video_id: r.get("youtube_video_id"),
+                    source_url: r.get("source_url"),
+                    title: r.get("title"),
+                    artist: r.get("artist"),
+                    channel: r.get("channel"),
+                    published_at: r.get("published_at"),
+                    duration_seconds: r.get("duration_seconds"),
+                    thumbnail_url: r.get("thumbnail_url"),
+                    availability: r
+                        .get::<Option<String>, _>("availability")
+                        .map(|s| Availability::from_str(&s).unwrap_or(Availability::Unknown))
+                        .unwrap_or(Availability::Unknown),
+                    metadata: r.get("metadata"),
+                    created_at: r.get("t_created_at"),
+                    updated_at: r.get("t_updated_at"),
+                })
+            } else {
+                None
+            };
+
+            JobItemWithTrack { item, track }
+        })
+        .collect();
+
+    let has_more = ((offset + limit) as i64) < total;
+
+    Ok(PaginatedJobItems {
+        items: items_with_track,
+        total: total as u32,
+        has_more,
     })
 }
 

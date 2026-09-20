@@ -33,50 +33,61 @@ interface JobEvent {
 function formatErrorMessage(err: unknown): string {
   if (!err) return "Ha ocurrido un error inesperado.";
 
-  let rawMessage = "";
-
+  // 1. Si el error es un string, devolverlo directamente
   if (typeof err === "string") {
-    rawMessage = err;
-  } else if (typeof err === "object") {
+    return err;
+  }
+
+  // 2. Si es un objeto, extraer información relevante
+  if (typeof err === "object" && err !== null) {
     const errorObj = err as Record<string, unknown>;
+
+    // 2a. ErrorDto de Rust (tiene kind + userMessage/user_message)
     if (typeof errorObj.userMessage === "string") {
       return errorObj.userMessage;
     }
     if (typeof errorObj.user_message === "string") {
       return errorObj.user_message;
     }
-    if (typeof errorObj.message === "string") {
-      rawMessage = errorObj.message;
-    } else {
-      try {
-        return JSON.stringify(err, null, 2);
-      } catch {
-        return String(err);
-      }
-    }
-  } else {
-    return String(err);
-  }
 
-  // Verificar si rawMessage contiene un objeto JSON clasificado (ej. error de yt-dlp)
-  const jsonStart = rawMessage.indexOf("{");
-  const jsonEnd = rawMessage.lastIndexOf("}");
-  if (jsonStart !== -1 && jsonEnd > jsonStart) {
-    try {
-      const parsed = JSON.parse(rawMessage.slice(jsonStart, jsonEnd + 1));
-      if (parsed && typeof parsed === "object") {
-        const userMsg = parsed.userMessage || parsed.user_message || parsed.message;
-        if (typeof userMsg === "string") {
-          const prefix = rawMessage.slice(0, jsonStart).trim().replace(/:\s*$/, "");
-          return prefix ? `${prefix}: ${userMsg}` : userMsg;
+    // 2b. ClassifiedError de Rust (JSON con category + userMessage)
+    if (typeof errorObj.message === "string") {
+      const rawMessage = errorObj.message;
+
+      // Intentar parsear JSON clasificado embebido en el mensaje
+      const jsonStart = rawMessage.indexOf("{");
+      const jsonEnd = rawMessage.lastIndexOf("}");
+      if (jsonStart !== -1 && jsonEnd > jsonStart) {
+        try {
+          const parsed = JSON.parse(rawMessage.slice(jsonStart, jsonEnd + 1));
+          if (parsed && typeof parsed === "object") {
+            const userMsg =
+              parsed.userMessage || parsed.user_message || parsed.message;
+            if (typeof userMsg === "string") {
+              const prefix = rawMessage
+                .slice(0, jsonStart)
+                .trim()
+                .replace(/:\s*$/, "");
+              return prefix ? `${prefix}: ${userMsg}` : userMsg;
+            }
+          }
+        } catch {
+          // Mantener rawMessage
         }
       }
+      return rawMessage;
+    }
+
+    // 2c. Objeto sin campo message reconocido -> JSON.stringify
+    try {
+      return JSON.stringify(err, null, 2);
     } catch {
-      // Mantener rawMessage
+      return String(err);
     }
   }
 
-  return rawMessage;
+  // 3. Otros tipos (number, boolean, etc.)
+  return String(err);
 }
 
 export function App() {

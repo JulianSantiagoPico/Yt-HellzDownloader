@@ -6,9 +6,13 @@ pub mod events;
 pub mod filesystem;
 pub mod persistence;
 pub mod processes;
+pub mod scheduler;
 pub mod updater;
 pub mod youtube;
 
+use std::sync::Arc;
+
+use scheduler::DownloadScheduler;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -21,6 +25,7 @@ pub struct AppState {
     pub data_directory: String,
     pub processes: ProcessRegistry,
     pub initial_recovery_report: Mutex<persistence::RecoveryReport>,
+    pub scheduler: Arc<DownloadScheduler>,
 }
 
 #[derive(Serialize)]
@@ -57,11 +62,35 @@ pub fn run() {
                 tauri::async_runtime::block_on(persistence::recover_on_startup(&pool))
                     .unwrap_or_default();
 
+            // Crear scheduler
+            let resource_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_default();
+            let settings = tauri::async_runtime::block_on(persistence::repositories::settings::get_settings(&pool))
+                .unwrap_or_default();
+            let max_downloads = settings.max_concurrent_downloads.max(1) as usize;
+            let max_conversions = settings.max_concurrent_conversions.max(1) as usize;
+
+            let scheduler = Arc::new(DownloadScheduler::new(
+                pool.clone(),
+                resource_dir,
+                max_downloads,
+                max_conversions,
+            ));
+
+            // Arrancar el loop del scheduler en background
+            let scheduler_clone = scheduler.clone();
+            tauri::async_runtime::spawn(async move {
+                scheduler_clone.run().await;
+            });
+
             app.manage(AppState {
                 pool,
                 data_directory: data_dir.display().to_string(),
                 processes: ProcessRegistry::default(),
                 initial_recovery_report: Mutex::new(recovery_report),
+                scheduler,
             });
             Ok(())
         })

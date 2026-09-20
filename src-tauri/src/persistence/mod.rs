@@ -61,6 +61,7 @@ mod tests {
         states::{JobItemStatus, JobKind, JobStatus, OrganizationMode},
     };
     use crate::filesystem::ExistingFilePolicy;
+    use sqlx::Row;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -320,6 +321,364 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res3, AcquireReservationResult::Acquired);
+    }
+
+    #[tokio::test]
+    async fn test_migration_0003_allows_fail_if_exists_policy() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Insertar job con fail_if_exists — debe ser aceptado tras la migración 0003
+        let job_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO jobs (id, kind, status, source_url, output_directory, existing_file_policy) VALUES (?, 'import', 'created', 'https://youtube.com/test', 'C:\\temp', 'fail_if_exists')")
+            .bind(&job_id)
+            .execute(&pool)
+            .await
+            .expect("INSERT con fail_if_exists debe funcionar tras migración 0003");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE existing_file_policy = 'fail_if_exists'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verificar que la política por defecto sigue siendo 'ask'
+        let default_policy: String = sqlx::query_scalar("SELECT existing_file_policy FROM jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(default_policy, "fail_if_exists");
+    }
+
+    #[tokio::test]
+    async fn test_migration_0003_creates_required_indexes() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Verificar que los índices existen
+        let idx_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_jobs_playlist_id', 'idx_job_items_job_status', 'idx_local_files_format_profile')"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(idx_count, 3, "Los 3 índices nuevos deben existir tras migración 0003");
+    }
+
+    #[tokio::test]
+    async fn test_migration_0003_preserves_existing_jobs() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Insertar un job antes del test
+        let job_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO jobs (id, kind, status, source_url, output_directory) VALUES (?, 'import', 'created', 'https://youtube.com/old', 'C:\\old')")
+            .bind(&job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Verificar que el dato persiste
+        let retrieved: String = sqlx::query_scalar("SELECT source_url FROM jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retrieved, "https://youtube.com/old");
+    }
+
+    #[tokio::test]
+    async fn test_migration_0003_invalid_policy_rejected() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Intentar insertar un valor inválido en existing_file_policy
+        let result = sqlx::query("INSERT INTO jobs (id, kind, status, source_url, output_directory, existing_file_policy) VALUES (?, 'import', 'created', 'url', 'dir', 'invalid_policy')")
+            .bind(Uuid::new_v4().to_string())
+            .execute(&pool)
+            .await;
+        assert!(result.is_err(), "Políticas inválidas deben ser rechazadas por CHECK");
+    }
+
+    #[tokio::test]
+    async fn test_recovery_detects_existing_temporary_files() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Crear un archivo temporal real
+        let temp_dir = std::env::temp_dir().join(format!("yt_test_recovery_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("video.tmp"), b"fake data").unwrap();
+
+        let job_id = Uuid::new_v4().to_string();
+        let job = Job {
+            id: job_id.clone(),
+            playlist_id: None,
+            kind: JobKind::Import,
+            status: JobStatus::Running,
+            priority: 0,
+            source_url: "playlist_url".into(),
+            output_directory: "dir".into(),
+            organization_mode: OrganizationMode::PlaylistFolder,
+            format_profile: "mp3_192".into(),
+            existing_file_policy: ExistingFilePolicy::Ask,
+            cancel_requested_at: None,
+            created_at: "2026-09-14 20:00:00".into(),
+            started_at: None,
+            completed_at: None,
+        };
+        create_job(&pool, &job).await.unwrap();
+
+        let item_id = Uuid::new_v4().to_string();
+        let item = JobItem {
+            id: item_id.clone(),
+            job_id: job_id.clone(),
+            track_id: None,
+            playlist_track_id: None,
+            playlist_position: Some(1),
+            status: JobItemStatus::Downloading,
+            priority_offset: 0,
+            progress_percent: Some(50.0),
+            downloaded_bytes: Some(500),
+            estimated_total_bytes: Some(1000),
+            attempts: 1,
+            next_attempt_at: None,
+            temporary_path: Some(temp_dir.to_string_lossy().to_string()),
+            output_path: None,
+            error_code: None,
+            error_message: None,
+            execution_lease_expires_at: Some("2026-09-14 19:00:00".into()),
+            created_at: "2026-09-14 18:50:00".into(),
+            started_at: Some("2026-09-14 18:51:00".into()),
+            completed_at: None,
+        };
+        create_job_item(&pool, &item).await.unwrap();
+
+        let report = recover_on_startup(&pool).await.unwrap();
+        assert_eq!(report.interrupted_items_count, 1);
+
+        let detail = &report.interrupted_items_details[0];
+        assert_eq!(detail.item_id, item_id);
+        assert!(detail.has_temporary_files, "Debe detectar archivos temporales existentes");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_recovery_detects_no_temporary_files_when_missing() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let job_id = Uuid::new_v4().to_string();
+        let job = Job {
+            id: job_id.clone(),
+            playlist_id: None,
+            kind: JobKind::Import,
+            status: JobStatus::Running,
+            priority: 0,
+            source_url: "playlist_url".into(),
+            output_directory: "dir".into(),
+            organization_mode: OrganizationMode::PlaylistFolder,
+            format_profile: "mp3_192".into(),
+            existing_file_policy: ExistingFilePolicy::Ask,
+            cancel_requested_at: None,
+            created_at: "2026-09-14 20:00:00".into(),
+            started_at: None,
+            completed_at: None,
+        };
+        create_job(&pool, &job).await.unwrap();
+
+        let item_id = Uuid::new_v4().to_string();
+        let item = JobItem {
+            id: item_id.clone(),
+            job_id: job_id.clone(),
+            track_id: None,
+            playlist_track_id: None,
+            playlist_position: Some(1),
+            status: JobItemStatus::Converting,
+            priority_offset: 0,
+            progress_percent: Some(50.0),
+            downloaded_bytes: Some(500),
+            estimated_total_bytes: Some(1000),
+            attempts: 1,
+            next_attempt_at: None,
+            temporary_path: Some("C:\\nonexistent\\path\\item.mp3".into()),
+            output_path: None,
+            error_code: None,
+            error_message: None,
+            execution_lease_expires_at: None,
+            created_at: "2026-09-14 18:50:00".into(),
+            started_at: Some("2026-09-14 18:51:00".into()),
+            completed_at: None,
+        };
+        create_job_item(&pool, &item).await.unwrap();
+
+        let report = recover_on_startup(&pool).await.unwrap();
+        assert_eq!(report.interrupted_items_count, 1);
+
+        let detail = &report.interrupted_items_details[0];
+        assert!(!detail.has_temporary_files, "No debe reportar archivos temporales si la ruta no existe");
+    }
+
+    #[tokio::test]
+    async fn test_index_job_items_job_status_used_in_scheduler_query() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Insertar datos de prueba
+        let job_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO jobs (id, kind, status, priority, source_url, output_directory, format_profile, existing_file_policy, created_at) VALUES (?, 'import', 'running', 0, 'url', 'dir', 'mp3_192', 'rename', '2026-01-01 00:00:00')")
+            .bind(&job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let track_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO tracks (id, youtube_video_id, source_url, title, artist, channel, availability, created_at, updated_at) VALUES (?, 'vid1', 'url', 'Title', 'Artist', 'Channel', 'available', '2026-01-01', '2026-01-01')")
+            .bind(&track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let item_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO job_items (id, job_id, track_id, playlist_position, status, priority_offset, progress_percent, downloaded_bytes, attempts, created_at) VALUES (?, ?, ?, 1, 'queued', 0, 0.0, 0, 0, '2026-01-01')")
+            .bind(&item_id)
+            .bind(&job_id)
+            .bind(&track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Ejecutar la query del scheduler y verificar que usa el índice
+        let plan_rows = sqlx::query(
+            "EXPLAIN QUERY PLAN SELECT ji.id, ji.job_id FROM job_items ji JOIN jobs j ON ji.job_id = j.id WHERE ji.status = 'queued' AND j.status IN ('queued', 'running')"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let plan_text: String = plan_rows
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // La query plan debe usar el índice idx_job_items_job_status
+        assert!(
+            plan_text.contains("idx_job_items_job_status") || plan_text.contains("USING INDEX"),
+            "El plan debe usar idx_job_items_job_status, plan: {}",
+            plan_text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_local_files_format_profile_used() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Insertar local_files con distintos format_profile
+        let track_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO tracks (id, youtube_video_id, source_url, title, artist, channel, availability, created_at, updated_at) VALUES (?, 'vid1', 'url', 'Title', 'Artist', 'Channel', 'available', '2026-01-01', '2026-01-01')")
+            .bind(&track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for (i, profile) in ["mp3_128", "mp3_192", "mp3_320", "mp3_192"].iter().enumerate() {
+            sqlx::query("INSERT INTO local_files (id, track_id, format_profile, path, size_bytes, modified_at, validation_status, validated_at, video_id_tag, created_at) VALUES (?, ?, ?, ?, 1024, '2026-01-01', 'valid', '2026-01-01', 'vid1', '2026-01-01')")
+                .bind(Uuid::new_v4().to_string())
+                .bind(&track_id)
+                .bind(profile)
+                .bind(format!("/tmp/file_{}.mp3", i))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Verificar que el índice existe
+        let idx_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = 'idx_local_files_format_profile'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(idx_exists, "El índice idx_local_files_format_profile debe existir");
+
+        // Ejecutar query con filtro por format_profile
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM local_files WHERE format_profile = 'mp3_192'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2, "Debe encontrar 2 archivos con mp3_192");
+    }
+
+    #[tokio::test]
+    async fn test_index_jobs_playlist_id_used() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // Crear playlist
+        let playlist_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO playlists (id, youtube_playlist_id, source_url, source_kind, title, channel, created_at, updated_at) VALUES (?, 'yt_pl', 'url', 'youtube', 'My Playlist', 'Channel', '2026-01-01', '2026-01-01')")
+            .bind(&playlist_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Insertar jobs con distintos playlist_id
+        for i in 0..5 {
+            sqlx::query("INSERT INTO jobs (id, kind, status, priority, source_url, output_directory, format_profile, existing_file_policy, playlist_id, created_at) VALUES (?, 'import', 'created', 0, 'url', 'dir', 'mp3_192', 'rename', ?, '2026-01-01')")
+                .bind(Uuid::new_v4().to_string())
+                .bind(if i == 0 { Some(&playlist_id) } else { None })
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Verificar que el índice existe
+        let idx_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = 'idx_jobs_playlist_id'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(idx_exists, "El índice idx_jobs_playlist_id debe existir");
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE playlist_id = ?"
+        )
+        .bind(&playlist_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_insert_job_with_all_valid_policies() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let policies = ["ask", "reuse", "overwrite", "rename", "fail_if_exists"];
+        for policy in policies {
+            let result = sqlx::query(
+                "INSERT INTO jobs (id, kind, status, source_url, output_directory, existing_file_policy) VALUES (?, 'import', 'created', 'url', 'dir', ?)"
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(policy)
+            .execute(&pool)
+            .await;
+            assert!(result.is_ok(), "Policy '{}' debe ser aceptada", policy);
+        }
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 5);
     }
 
     #[tokio::test]

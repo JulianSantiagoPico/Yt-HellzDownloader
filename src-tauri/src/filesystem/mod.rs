@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,222 @@ impl ExistingFilePolicy {
             Self::FailIfExists => "fail_if_exists",
         }
     }
+}
+
+/// Tipo de volumen detectado para aplicar estrategias distintas de movimiento.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum VolumeKind {
+    Ntfs,
+    Fat,
+    Unknown,
+}
+
+/// Detecta el tipo de sistema de archivos de un path usando GetVolumeInformationW.
+#[cfg(windows)]
+pub fn detect_volume_kind(path: &Path) -> VolumeKind {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+
+    // Obtener la ruta raíz del volumen (ej: "C:\")
+    let path_str = path.to_string_lossy();
+    let path_ref: &str = &path_str;
+    let root_path: Vec<u16> = if path_ref.len() >= 3 && path_ref.as_bytes()[1] == b':' {
+        let root = format!("{}\\", &path_ref[..3]);
+        OsStr::new(&root)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    } else {
+        OsStr::new(path_ref)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+
+    let mut fs_name_buffer = vec![0u16; 64];
+    let mut serial_number: u32 = 0;
+    let mut max_component_length: u32 = 0;
+    let mut fs_flags: u32 = 0;
+
+    let result = unsafe {
+        GetVolumeInformationW(
+            root_path.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut serial_number,
+            &mut max_component_length,
+            &mut fs_flags,
+            fs_name_buffer.as_mut_ptr(),
+            fs_name_buffer.len() as u32,
+        )
+    };
+
+    if result == 0 {
+        return VolumeKind::Unknown;
+    }
+
+    let fs_name = String::from_utf16_lossy(
+        &fs_name_buffer[..fs_name_buffer
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(fs_name_buffer.len())],
+    )
+    .to_ascii_uppercase();
+
+    match fs_name.as_str() {
+        "NTFS" => VolumeKind::Ntfs,
+        "FAT32" | "EXFAT" | "FAT" => VolumeKind::Fat,
+        _ => VolumeKind::Unknown,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn detect_volume_kind(_path: &Path) -> VolumeKind {
+    VolumeKind::Unknown
+}
+
+/// Reintenta una operación ante ERROR_SHARING_VIOLATION (código 32) con backoff exponencial.
+fn retry_on_sharing_violation<F, T>(mut f: F, max_retries: u32) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, std::io::Error>,
+{
+    for attempt in 0..=max_retries {
+        match f() {
+            Ok(val) => return Ok(val),
+            Err(e) if attempt < max_retries && e.raw_os_error() == Some(32) => {
+                std::thread::sleep(Duration::from_millis(100 * 2u64.pow(attempt)));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    unreachable!()
+}
+
+/// Mueve un archivo validado a su destino final aplicando estrategias según tipo de volumen.
+pub fn move_file_safely(src: &Path, dst: &Path, allow_overwrite: bool) -> Result<(), String> {
+    if !src.exists() {
+        return Err(format!("Archivo fuente no existe: {}", src.display()));
+    }
+
+    if dst.exists() && !allow_overwrite {
+        return Err(format!(
+            "El archivo destino '{}' ya existe y no se autorizó sobrescritura.",
+            dst.display()
+        ));
+    }
+
+    if let Some(parent) = dst.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let volume = detect_volume_kind(dst);
+
+    match volume {
+        VolumeKind::Ntfs => {
+            // NTFS: rename atómico + reemplazo atómico si dst existe
+            if !dst.exists() {
+                if let Err(e) = retry_on_sharing_violation(|| fs::rename(src, dst), 3) {
+                    // Fallback a copy+delete si rename falla por cross-volume
+                    if e.contains("different") || e.contains("17") || e.contains("cross") {
+                        return copy_and_replace(src, dst, allow_overwrite);
+                    }
+                    return Err(format!("Fallo al renombrar archivo en NTFS: {}", e));
+                }
+                return Ok(());
+            } else if allow_overwrite {
+                if let Err(e) = retry_on_sharing_violation(|| fs::rename(src, dst), 3) {
+                    if e.contains("different") || e.contains("17") || e.contains("cross") {
+                        return copy_and_replace(src, dst, allow_overwrite);
+                    }
+                    return Err(format!("Fallo al reemplazar archivo en NTFS: {}", e));
+                }
+                return Ok(());
+            }
+        }
+        VolumeKind::Fat | VolumeKind::Unknown => {
+            // FAT/Unknown: copia a .tmp.part, validar tamaño, reemplazar
+            let temp_part = dst.with_extension("tmp.part");
+            return move_via_temp_part(src, dst, &temp_part, allow_overwrite);
+        }
+    }
+
+    // Fallback genérico: copy + delete con reintentos para sharing violation
+    copy_and_replace(src, dst, allow_overwrite)
+}
+
+/// Implementa la estrategia de movimiento para FAT/Unknown: copia a .tmp.part + validación + rename.
+fn move_via_temp_part(
+    src: &Path,
+    dst: &Path,
+    temp_part: &Path,
+    allow_overwrite: bool,
+) -> Result<(), String> {
+    if let Err(e) = fs::copy(src, temp_part) {
+        let _ = fs::remove_file(temp_part);
+        return Err(format!("Fallo al copiar archivo al destino: {}", e));
+    }
+
+    // Validar tamaño idéntico
+    let src_len = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+    let part_len = fs::metadata(temp_part).map(|m| m.len()).unwrap_or(1);
+    if src_len != part_len || src_len == 0 {
+        let _ = fs::remove_file(temp_part);
+        return Err("Fallo de integridad: tamaño de archivo copiado no coincide".into());
+    }
+
+    // Reemplazar destino si existe
+    if dst.exists() {
+        if !allow_overwrite {
+            let _ = fs::remove_file(temp_part);
+            return Err("Sobrescritura no autorizada en destino".into());
+        }
+        if let Err(e) = fs::remove_file(dst) {
+            let _ = fs::remove_file(temp_part);
+            return Err(format!("No se pudo reemplazar archivo existente: {}", e));
+        }
+    }
+
+    // Renombrar temp_part a destino
+    if let Err(e) = fs::rename(temp_part, dst) {
+        let _ = fs::remove_file(temp_part);
+        return Err(format!("No se pudo finalizar renombrado de archivo: {}", e));
+    }
+
+    let _ = fs::remove_file(src);
+    Ok(())
+}
+
+/// Fallback: copiar, validar, y eliminar origen con reintentos para sharing violation.
+fn copy_and_replace(src: &Path, dst: &Path, allow_overwrite: bool) -> Result<(), String> {
+    let temp_dst = dst.with_extension(format!("tmp.{}", Uuid::new_v4()));
+
+    if let Err(e) = fs::copy(src, &temp_dst) {
+        let _ = fs::remove_file(&temp_dst);
+        return Err(format!("Fallo al copiar archivo al destino: {}", e));
+    }
+
+    let src_len = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+    let temp_len = fs::metadata(&temp_dst).map(|m| m.len()).unwrap_or(1);
+    if src_len != temp_len || src_len == 0 {
+        let _ = fs::remove_file(&temp_dst);
+        return Err("Fallo de integridad: tamaño de archivo copiado no coincide".into());
+    }
+
+    if dst.exists() {
+        if !allow_overwrite {
+            let _ = fs::remove_file(&temp_dst);
+            return Err("Sobrescritura no autorizada en destino".into());
+        }
+        retry_on_sharing_violation(|| fs::remove_file(dst), 3)
+            .map_err(|e| format!("No se pudo reemplazar archivo existente: {}", e))?;
+    }
+
+    retry_on_sharing_violation(|| fs::rename(&temp_dst, dst), 3)
+        .map_err(|e| format!("No se pudo finalizar renombrado de archivo: {}", e))?;
+
+    let _ = fs::remove_file(src);
+    Ok(())
 }
 
 /// Sanitiza un nombre de archivo para Windows, considerando caracteres prohibidos,
@@ -186,64 +403,6 @@ pub fn clean_item_temp_dir(item_dir: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Mueve un archivo validado a su destino final de forma atómica o segura con verificación y reemplazo.
-pub fn move_file_safely(src: &Path, dst: &Path, allow_overwrite: bool) -> Result<(), String> {
-    if !src.exists() {
-        return Err(format!("Archivo fuente no existe: {}", src.display()));
-    }
-
-    if dst.exists() && !allow_overwrite {
-        return Err(format!(
-            "El archivo destino '{}' ya existe y no se autorizó sobrescritura.",
-            dst.display()
-        ));
-    }
-
-    if let Some(parent) = dst.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    // 1. Intentar renombrado atómico (funciona en el mismo volumen NTFS)
-    if !dst.exists() && fs::rename(src, dst).is_ok() {
-        return Ok(());
-    }
-
-    // 2. Si dst existe y allow_overwrite está habilitado, o si están en volúmenes distintos:
-    let temp_dst = dst.with_extension(format!("tmp.{}", Uuid::new_v4()));
-    if let Err(e) = fs::copy(src, &temp_dst) {
-        let _ = fs::remove_file(&temp_dst);
-        return Err(format!("Fallo al copiar archivo al destino: {}", e));
-    }
-
-    // Validar tamaño idéntico antes de cualquier sustitución
-    let src_len = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
-    let temp_len = fs::metadata(&temp_dst).map(|m| m.len()).unwrap_or(1);
-    if src_len != temp_len || src_len == 0 {
-        let _ = fs::remove_file(&temp_dst);
-        return Err("Fallo de integridad: tamaño de archivo copiado no coincide".into());
-    }
-
-    // Sustituir de forma segura
-    if dst.exists() {
-        if !allow_overwrite {
-            let _ = fs::remove_file(&temp_dst);
-            return Err("Sobrescritura no autorizada en destino".into());
-        }
-        if let Err(e) = fs::remove_file(dst) {
-            let _ = fs::remove_file(&temp_dst);
-            return Err(format!("No se pudo reemplazar archivo existente: {}", e));
-        }
-    }
-
-    if let Err(e) = fs::rename(&temp_dst, dst) {
-        let _ = fs::remove_file(&temp_dst);
-        return Err(format!("No se pudo finalizar renombrado de archivo: {}", e));
-    }
-
-    let _ = fs::remove_file(src);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +505,60 @@ mod tests {
         assert!(resolved.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_detect_volume_kind_on_temp_dir() {
+        let temp_dir = std::env::temp_dir();
+        let kind = detect_volume_kind(&temp_dir);
+        // En Windows, el volumen de sistema suele ser NTFS
+        #[cfg(windows)]
+        assert!(
+            kind == VolumeKind::Ntfs || kind == VolumeKind::Fat || kind == VolumeKind::Unknown,
+            "VolumeKind debe ser uno de los valores conocidos"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(kind, VolumeKind::Unknown);
+    }
+
+    #[test]
+    fn test_move_file_safely_fat_strategy_uses_tmp_part() {
+        let temp_dir = std::env::temp_dir().join(format!("yt_fat_test_{}", Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let src = temp_dir.join("source_fat.mp3");
+        let dst = temp_dir.join("dest_fat.mp3");
+        fs::write(&src, b"fat test content").unwrap();
+
+        let res = move_file_safely(&src, &dst, true);
+        assert!(
+            res.is_ok(),
+            "move_file_safely debe completar: {:?}",
+            res.err()
+        );
+        assert_eq!(fs::read(&dst).unwrap(), b"fat test content");
+        assert!(!src.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_retry_on_sharing_violation_succeeds_immediately() {
+        let result = retry_on_sharing_violation(|| Ok(42u32), 3);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_retry_on_sharing_violation_propagates_error() {
+        let result: Result<u32, String> = retry_on_sharing_violation(
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file not found",
+                ))
+            },
+            3,
+        );
+        assert!(result.is_err());
     }
 }

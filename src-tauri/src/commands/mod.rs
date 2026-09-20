@@ -63,24 +63,14 @@ pub async fn create_job(
         }
     };
 
-    // 3. Verificar si ya existe la playlist y determinar el tipo de Job
-    let kind = if let Some(ref playlist_id) = validated.playlist_id {
-        if get_playlist_by_youtube_id(&state.pool, playlist_id)
-            .await?
-            .is_some()
+    // 3. Resolver la playlist a su ID interno. `jobs.playlist_id` es una
+    // clave foránea a `playlists.id`, no al ID público de YouTube.
+    let (kind, database_playlist_id) = if let Some(ref youtube_playlist_id) = validated.playlist_id
+    {
+        if let Some(existing) = get_playlist_by_youtube_id(&state.pool, youtube_playlist_id).await?
         {
-            JobKind::Sync
+            (JobKind::Sync, Some(existing.id))
         } else {
-            JobKind::Import
-        }
-    } else {
-        JobKind::Import
-    };
-
-    // 4. Crear registro de playlist si es necesario
-    if let Some(ref playlist_id) = validated.playlist_id {
-        let existing = get_playlist_by_youtube_id(&state.pool, playlist_id).await?;
-        if existing.is_none() {
             let source_kind = if source_url.contains("music.youtube.com") {
                 SourceKind::YouTubeMusic
             } else {
@@ -89,7 +79,7 @@ pub async fn create_job(
 
             let new_playlist = Playlist {
                 id: Uuid::new_v4().to_string(),
-                youtube_playlist_id: playlist_id.clone(),
+                youtube_playlist_id: youtube_playlist_id.clone(),
                 source_url: validated.canonical_url.clone(),
                 source_kind,
                 title: String::new(),
@@ -100,9 +90,12 @@ pub async fn create_job(
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
-            upsert_playlist(&state.pool, &new_playlist).await?;
+            let id = upsert_playlist(&state.pool, &new_playlist).await?;
+            (JobKind::Import, Some(id))
         }
-    }
+    } else {
+        (JobKind::Import, None)
+    };
 
     // 5. Parsear organization mode y existing file policy
     let org_mode = organization_mode
@@ -122,7 +115,7 @@ pub async fn create_job(
     // 6. Crear Job
     let job = Job {
         id: Uuid::new_v4().to_string(),
-        playlist_id: validated.playlist_id,
+        playlist_id: database_playlist_id,
         kind,
         status: JobStatus::Created,
         priority: 0,
@@ -223,7 +216,7 @@ pub async fn extract_and_enqueue_items(
         created_at: now.clone(),
         updated_at: now.clone(),
     };
-    upsert_playlist(&state.pool, &playlist).await?;
+    let actual_playlist_id = upsert_playlist(&state.pool, &playlist).await?;
 
     // 6. Procesar entradas en lotes
     let mut total: u32 = 0;
@@ -250,13 +243,13 @@ pub async fn extract_and_enqueue_items(
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
-            upsert_track(&state.pool, &track).await?;
+            let actual_track_id = upsert_track(&state.pool, &track).await?;
 
             // Crear PlaylistTrack
             let playlist_track = PlaylistTrack {
                 id: Uuid::new_v4().to_string(),
-                playlist_id: playlist.id.clone(),
-                track_id: track.id.clone(),
+                playlist_id: actual_playlist_id.clone(),
+                track_id: actual_track_id.clone(),
                 position: entry.index as i32,
                 source_entry_id: Some(entry.id.clone()),
                 title_at_sync: entry.title.clone(),
@@ -269,7 +262,7 @@ pub async fn extract_and_enqueue_items(
             let job_item = JobItem {
                 id: Uuid::new_v4().to_string(),
                 job_id: job_id.clone(),
-                track_id: Some(track.id),
+                track_id: Some(actual_track_id.clone()),
                 playlist_track_id: Some(playlist_track.id),
                 playlist_position: Some(entry.index as i32),
                 status: JobItemStatus::Queued,
@@ -306,7 +299,7 @@ pub async fn extract_and_enqueue_items(
 
     // 7. Asociar playlist_id al job
     sqlx::query("UPDATE jobs SET playlist_id = ? WHERE id = ?")
-        .bind(&playlist.id)
+        .bind(&actual_playlist_id)
         .bind(&job_id)
         .execute(&state.pool)
         .await?;
@@ -323,11 +316,14 @@ pub async fn extract_and_enqueue_items(
         },
     );
 
+    // Notificar al scheduler que hay items nuevos
+    state.scheduler.notify_new_items();
+
     Ok(ExtractionResult {
         total,
         available,
         unavailable: 0,
-        playlist_id: playlist.id,
+        playlist_id: actual_playlist_id,
     })
 }
 
@@ -392,11 +388,14 @@ pub async fn pause_job(
     let _ = emit_event(
         &app,
         &AppEvent::JobStateChanged {
-            job_id,
+            job_id: job_id.clone(),
             previous_status,
             new_status: updated_status.as_str().to_string(),
         },
     );
+
+    // Notificar al scheduler que pause el job
+    state.scheduler.pause_job(&job_id).await;
 
     Ok(updated_job)
 }
@@ -455,11 +454,15 @@ pub async fn resume_job(
     let _ = emit_event(
         &app,
         &AppEvent::JobStateChanged {
-            job_id,
+            job_id: job_id.clone(),
             previous_status,
             new_status: updated_status.as_str().to_string(),
         },
     );
+
+    // Reanudar el job en el scheduler y notificar
+    state.scheduler.resume_job(&job_id).await;
+    state.scheduler.notify_new_items();
 
     Ok(updated_job)
 }
@@ -536,11 +539,14 @@ pub async fn cancel_job(
     let _ = emit_event(
         &app,
         &AppEvent::JobStateChanged {
-            job_id,
+            job_id: job_id.clone(),
             previous_status,
             new_status: updated_status.as_str().to_string(),
         },
     );
+
+    // Cancelar el job en el scheduler
+    state.scheduler.cancel_job(&job_id).await;
 
     Ok(updated_job)
 }
@@ -589,6 +595,10 @@ pub async fn retry_failed_items(
         .await?;
 
         retried_count += 1;
+    }
+
+    if retried_count > 0 {
+        state.scheduler.notify_new_items();
     }
 
     Ok(retried_count)

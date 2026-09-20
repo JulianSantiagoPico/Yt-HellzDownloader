@@ -5,12 +5,22 @@ use std::{
     time::Duration,
 };
 
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::processes::{tool_path, Tool};
+
+/// Clave pública ed25519 para verificar firmas de manifiestos.
+/// DEBE reemplazarse con una clave real generada con `ed25519-dalek` antes de producción.
+const PUB_KEY_BYTES: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 /// Información de una versión de yt-dlp en el manifiesto.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,6 +54,38 @@ pub struct UpdateResult {
     pub new_version: String,
     pub success: bool,
     pub message: String,
+}
+
+/// Envoltorio del manifiesto remoto con firma ed25519.
+#[derive(Deserialize)]
+struct ManifestWrapper {
+    payload: String,
+    signature: String,
+}
+
+/// Verifica la firma ed25519 del manifiesto de actualizaciones.
+fn verify_manifest_signature_with_key(
+    payload: &str,
+    signature_hex: &str,
+    pub_key: &[u8; 32],
+) -> Result<(), String> {
+    let sig_bytes = hex::decode(signature_hex)
+        .map_err(|_| "Firma con hex inválido".to_string())?;
+    let sig: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "Firma debe tener 64 bytes".to_string())?;
+    let signature = Signature::from_bytes(&sig);
+
+    let key = VerifyingKey::from_bytes(pub_key)
+        .map_err(|e| format!("Clave pública inválida: {}", e))?;
+
+    key.verify(payload.as_bytes(), &signature)
+        .map_err(|_| "Firma del manifiesto inválida".to_string())
+}
+
+/// Verifica la firma ed25519 del manifiesto usando la clave embebida.
+fn verify_manifest_signature(payload: &str, signature_hex: &str) -> Result<(), String> {
+    verify_manifest_signature_with_key(payload, signature_hex, &PUB_KEY_BYTES)
 }
 
 /// Obtiene la versión actual de yt-dlp ejecutando `yt-dlp --version`.
@@ -127,9 +169,17 @@ pub async fn check_for_updates(
         ));
     }
 
-    let remote_manifest: UpdateManifest = response
-        .json()
+    let remote_text = response
+        .text()
         .await
+        .map_err(|e| format!("Error al leer cuerpo del manifiesto: {}", e))?;
+
+    let wrapper: ManifestWrapper = serde_json::from_str(&remote_text)
+        .map_err(|e| format!("Error al parsear envoltorio del manifiesto: {}", e))?;
+
+    verify_manifest_signature(&wrapper.payload, &wrapper.signature)?;
+
+    let remote_manifest: UpdateManifest = serde_json::from_str(&wrapper.payload)
         .map_err(|e| format!("Error al parsear manifiesto remoto: {}", e))?;
 
     let mut local_manifest = load_manifest(resource_dir)?;
@@ -264,4 +314,75 @@ pub fn register_version(
     }
 
     save_manifest(resource_dir, &manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn gen_keypair() -> (SigningKey, [u8; 32]) {
+        let mut bytes = [0u8; 32];
+        rand::fill(&mut bytes);
+        let signing_key = SigningKey::from_bytes(&bytes);
+        let verifying_key = signing_key.verifying_key();
+        (signing_key, verifying_key.to_bytes())
+    }
+
+    #[test]
+    fn test_verify_manifest_signature_valid() {
+        let (signing_key, pub_bytes) = gen_keypair();
+
+        let payload = r#"{"current_version":"2024.01.01","releases":[]}"#;
+        let sig = signing_key.sign(payload.as_bytes());
+        let sig_hex = hex::encode(sig.to_bytes());
+
+        assert!(verify_manifest_signature_with_key(payload, &sig_hex, &pub_bytes).is_ok());
+    }
+
+    #[test]
+    fn test_verify_manifest_signature_invalid() {
+        let payload = r#"{"current_version":"2024.01.01","releases":[]}"#;
+        let fake_sig = hex::encode([0u8; 64]);
+
+        assert!(verify_manifest_signature(payload, &fake_sig).is_err());
+    }
+
+    #[test]
+    fn test_verify_manifest_signature_payload_tampered() {
+        let (signing_key, pub_bytes) = gen_keypair();
+
+        let original = r#"{"current_version":"2024.01.01","releases":[]}"#;
+        let sig = signing_key.sign(original.as_bytes());
+        let sig_hex = hex::encode(sig.to_bytes());
+
+        let tampered = r#"{"current_version":"2024.01.02","releases":[]}"#;
+        assert!(verify_manifest_signature_with_key(tampered, &sig_hex, &pub_bytes).is_err());
+    }
+
+    #[test]
+    fn test_verify_manifest_signature_invalid_hex() {
+        let result = verify_manifest_signature("payload", "not_valid_hex!");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("hex inválido"));
+    }
+
+    #[test]
+    fn test_verify_manifest_signature_wrong_length_hex() {
+        let result = verify_manifest_signature("payload", "abcd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("64 bytes"));
+    }
+
+    #[test]
+    fn test_verify_manifest_signature_wrong_key() {
+        let (signing_key, _) = gen_keypair();
+        let (_, wrong_pub) = gen_keypair();
+
+        let payload = r#"{"current_version":"2024.01.01","releases":[]}"#;
+        let sig = signing_key.sign(payload.as_bytes());
+        let sig_hex = hex::encode(sig.to_bytes());
+
+        assert!(verify_manifest_signature_with_key(payload, &sig_hex, &wrong_pub).is_err());
+    }
 }

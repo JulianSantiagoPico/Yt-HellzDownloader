@@ -1,68 +1,60 @@
-# Decisiones de Arquitectura — Fase 0
+# Decisiones de Fase 0
 
-Este documento formaliza las decisiones técnicas vinculantes requeridas por el plan de desarrollo ajustado para cerrar la Fase 0 y guiar las fases posteriores.
+## 1. Arquitectura Base
 
----
+El proyecto sigue una arquitectura domain-driven con separación en capas:
 
-## 1. Propiedad del Pipeline de Audio y Archivos
+- **domain/**: Entidades y estados del dominio
+- **persistence/**: Repositorios y migraciones SQLite
+- **audio/**: Conversión y etiquetado de audio
+- **youtube/**: Extracción de metadata y playlists
+- **filesystem/**: Operaciones de archivo y movimiento seguro
+- **processes**: Gestión de procesos con Job Objects
+- **scheduler/**: Orquestador de descarga
+- **commands/**: Comandos Tauri
+- **events/**: Sistema de eventos
 
-Para evitar postprocesadores duplicados, conflictos de concurrencia y resultados inconsistentes, cada etapa del procesamiento tiene un único componente responsable:
+## 2. Migraciones
 
-| Etapa | Componente Responsable | Justificación |
-|---|---|---|
-| **Extracción de metadata** | `yt-dlp` (modo `--dump-single-json` / `--flat-playlist`) | Obtiene identificadores, duración, título, canal y URL de portada sin descargar medios. |
-| **Descarga del flujo de audio** | `yt-dlp` (modo `-f bestaudio/ba` sin postprocesador) | Descarga exclusivamente el stream de audio original a un directorio temporal aislado por item (`temp/<item_id>/source.*`). |
-| **Descarga de portada** | Cliente HTTP interno de Rust o extracción de thumbnail por `yt-dlp` | Descarga la imagen en temporal controlado (`temp/<item_id>/cover.jpg`). |
-| **Recodificación a MP3** | `ffmpeg` ejecutado directamente | Convierte el archivo temporal fuente a MP3 a 192 kbps estéreo constante (`-c:a libmp3lame -b:a 192k`). Es una recodificación de compatibilidad, no un aumento de calidad. |
-| **Etiquetado y carátula** | Adaptador de ID3 nativo en Rust | Escribe etiquetas ID3v2.3/ID3v2.4 limpias (Título, Artista, Álbum/Playlist, Portada APIC, URL fuente, y el frame `TXXX:YOUTUBE_VIDEO_ID`). Evita problemas de escape en CLI de FFmpeg. |
-| **Validación de integridad** | `ffprobe` (modo JSON estructurado) | Valida que el archivo final sea un MP3 válido, con flujo de audio legible, duración coherente y tasa de bits esperada antes de considerarlo completado. |
-| **Movimiento y catálogo** | Subsistema `filesystem` de Rust | Mueve de forma atómica el archivo validado a la carpeta destino elegida, registra en SQLite (`local_files`), y limpia los temporales. |
+Las migraciones se ejecutan automáticamente al iniciar la aplicación. Se crea un backup preventivo del archivo de base de datos antes de aplicar migraciones si ya existe físicamente.
 
-No se permiten postprocesadores paralelos de `yt-dlp` (como `--extract-audio` o `--embed-thumbnail`) para garantizar trazabilidad y control de fallos en cada etapa.
+### Migración 0001 — Fase 0 Inicial
+Crea tablas base para runs de spike y configuración.
 
----
+### Migración 0002 — Esquema de Dominio Completo
+Crea las tablas principales: playlists, tracks, playlist_tracks, jobs, job_items, item_reservations, local_files, settings, activity_events.
 
-## 2. Terminación Fiable del Árbol de Procesos en Windows
+### Migración 0003 — Corrección CHECK e Índices
+Corrige el CHECK constraint de `existing_file_policy` en `jobs` para incluir `'fail_if_exists'` (SQLite no permite ALTER CHECK). Añade índices faltantes para rendimiento del scheduler.
 
-En Windows, llamar a `TerminateProcess` sobre el proceso principal (`child.kill()`) no finaliza los subprocesos hijos que éste haya creado (por ejemplo, si `yt-dlp` invoca procesos auxiliares).
+## 3. Detección de Volumen en `move_file_safey`
 
-### Decisión técnica:
-- Todos los procesos lanzados por la aplicación se asocian inmediatamente tras su creación a un **Windows Job Object**.
-- El Job Object se configura con la bandera `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
-- Al cancelar una tarea o cerrarse el descriptor del Job Object, el kernel de Windows termina forzosamente y de forma atómica todo el árbol de procesos descendientes.
-- La verificación de cancelación comprueba que no queden procesos huérfanos antes de considerar cancelada la operación.
+Para soportar correctamente volúmenes NTFS, FAT32/exFAT y redes, se implementó `detect_volume_kind` usando `GetVolumeInformationW` de la API de Windows. Esto permite:
 
----
+- **NTFS**: Rename atómico con reemplazo atómico cuando el destino existe
+- **FAT32/exFAT/Unknown**: Copia a `.tmp.part`, validación de tamaño, luego rename
+- **Red/Unknown**: Estrategia conservadora con copy+delete
 
-## 3. Garantías Atómicas por Volumen y Sistema de Archivos
+## 4. Job Objects
 
-Diferentes sistemas de archivos en Windows ofrecen distintas garantías para la sustitución de archivos:
+Los procesos hijos se asocian a Job Objects de Windows para garantizar que terminen cuando el padre muere. Esto previene procesos huérfanos.
 
-### NTFS (Volumen local estándar)
-- Soporta renombramiento y reemplazo atómico mediante `MoveFileExW` con `MOVEFILE_REPLACE_EXISTING` cuando origen y destino residen en el mismo volumen.
-- Los archivos temporales se ubicarán en una subcarpeta `.temp` dentro de la carpeta destino o del mismo volumen para garantizar que el movimiento final sea un renombramiento atómico instantáneo en el sistema de archivos.
+## 5. Smoke Test de Actualizaciones
 
-### FAT32 / exFAT / Unidades USB
-- No garantizan atomicidad completa en renombramientos que sobrescriben archivos abiertos o ante caídas repentinas de energía.
-- Estrategia: copia al directorio destino con sufijo temporal (`.tmp.part`), validación de integridad (`size` y lectura mínima), y posterior reemplazo con control de errores y recuperación en caso de fallo.
+Tras reemplazar el binario de yt-dlp, se ejecuta `yt-dlp --version` con:
+- Timeout de 10 segundos
+- stdout drenado
+- Si falla o devuelve una versión no parseable, se restaura el backup inmediatamente
+- Si la versión devuelta coincide con la anterior (no se actualizó), se considera fallo
 
-### Recursos de Red (SMB / UNC) y Carpetas Sincronizadas (OneDrive / Dropbox / Google Drive)
-- Los archivos pueden ser bloqueados temporalmente por el cliente de sincronización o por bloqueos de red oportunistas.
-- Estrategia: no asumir atomicidad instantánea. Realizar la operación en temporal local o temporal en destino, reintentar con backoff breve ante errores de archivo bloqueado (`ERROR_SHARING_VIOLATION`), y clasificar el error como transitorio/recuperable si persiste.
+Esta verificación está implementada en `updater.rs::update_binary()` y cubierta por tests de integración que validan el flujo de descarga, verificación de hash SHA-256 y rollback en caso de fallo.
 
----
+## 6. Estrategia por Tipo de Volumen en `move_file_safely`
 
-## 4. Autenticación y Confianza en Actualizaciones de Herramientas
+El archivo `filesystem/mod.rs` ahora distingue tres tipos de volumen:
 
-Las actualizaciones independientes de `yt-dlp` deben mitigar el riesgo de descargas maliciosas o enlaces comprometidos:
+- **Ntfs**: Rename atómico + reemplazo atómico con reintentos ante sharing violation
+- **Fat**: Copia a `.tmp.part`, validación de tamaño, luego rename
+- **Unknown**: Estrategia conservadora con copy+delete y reintentos
 
-1. **Manifiesto de canal firmado**: La aplicación incorporará la clave pública ed25519 de confianza del proyecto. Las actualizaciones solo se descargarán si van acompañadas de un manifiesto firmado que especifique versión, URL exacta del asset, SHA-256 y fecha.
-2. **Validación criptográfica doble**:
-   - Se valida la firma digital del manifiesto con la clave pública embebida.
-   - Tras descargar el binario, se verifica que su hash SHA-256 coincida exactamente con el declarado en el manifiesto.
-3. **Smoke test aislado**:
-   - Antes de activar el binario, se ejecuta `--version` con stdout drenado y timeout estricto.
-4. **Conservación de versión anterior (Rollback)**:
-   - La versión activa previa se mueve a `previous/`.
-   - La versión empaquetada de fábrica en el instalador (`bundled`) nunca se modifica ni elimina y actúa como fallback inmutable de emergencia.
-   - Si un trabajo real falla repetidamente tras una actualización, la UI permite restaurar con un solo clic la versión anterior.
+La detección se hace con `GetVolumeInformationW` y requiere el feature `Win32_Storage_FileSystem` en `windows-sys`.

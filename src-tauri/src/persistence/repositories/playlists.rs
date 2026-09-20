@@ -9,8 +9,8 @@ use crate::domain::{
 pub async fn upsert_playlist(
     pool: &SqlitePool,
     playlist: &Playlist,
-) -> Result<Playlist, sqlx::Error> {
-    sqlx::query(
+) -> Result<String, sqlx::Error> {
+    let returned_id: String = sqlx::query_scalar(
         r#"
         INSERT INTO playlists (
             id, youtube_playlist_id, source_url, source_kind, title,
@@ -25,6 +25,7 @@ pub async fn upsert_playlist(
             default_output_directory = COALESCE(excluded.default_output_directory, playlists.default_output_directory),
             last_synced_at = excluded.last_synced_at,
             updated_at = CURRENT_TIMESTAMP
+        RETURNING id
         "#,
     )
     .bind(&playlist.id)
@@ -38,10 +39,10 @@ pub async fn upsert_playlist(
     .bind(&playlist.last_synced_at)
     .bind(&playlist.created_at)
     .bind(&playlist.updated_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(playlist.clone())
+    Ok(returned_id)
 }
 
 fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> Playlist {
@@ -111,8 +112,8 @@ pub async fn list_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, sqlx::Er
     Ok(rows.iter().map(map_playlist_row).collect())
 }
 
-pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<Track, sqlx::Error> {
-    sqlx::query(
+pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<String, sqlx::Error> {
+    let returned_id: String = sqlx::query_scalar(
         r#"
         INSERT INTO tracks (
             id, youtube_video_id, source_url, title, artist, channel,
@@ -130,6 +131,7 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<Track, sql
             availability = excluded.availability,
             metadata = COALESCE(excluded.metadata, tracks.metadata),
             updated_at = CURRENT_TIMESTAMP
+        RETURNING id
         "#,
     )
     .bind(&track.id)
@@ -145,10 +147,10 @@ pub async fn upsert_track(pool: &SqlitePool, track: &Track) -> Result<Track, sql
     .bind(&track.metadata)
     .bind(&track.created_at)
     .bind(&track.updated_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(track.clone())
+    Ok(returned_id)
 }
 
 fn map_track_row(r: &sqlx::sqlite::SqliteRow) -> Track {

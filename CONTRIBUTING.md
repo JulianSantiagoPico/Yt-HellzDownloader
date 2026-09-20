@@ -36,3 +36,17 @@ git push origin main --follow-tags
 ```
 
 El workflow `Release` valida la versión, descarga y verifica los sidecars, genera el instalador NSIS y el ZIP portable, y publica ambos en GitHub Releases.
+
+## Sidecars reproducibles
+
+`src-tauri/binaries/sidecars.lock.json` fija las versiones, URL inmutables y SHA-256 de `yt-dlp`, `ffmpeg` y `ffprobe`. CI y los releases solo consumen ese lock; no consultan versiones `latest`. Para actualizar un sidecar, usa el comando explícito con las versiones y hashes publicados, revisa el cambio y ejecuta:
+
+```powershell
+npm run sidecars:lock:update -- -YtDlpVersion 2026.08.19 -YtDlpSha256 <sha256> -FfmpegVersion 9.0.1 -FfmpegSha256 <sha256> -FfprobeSha256 <sha256>
+```
+
+```powershell
+npm run sidecars:lock:check
+npm run sidecars:download
+npm run sidecars:verify
+```

@@ -1,25 +1,22 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Bin = Join-Path $Root "src-tauri\binaries"
-$ManifestPath = Join-Path $Bin "sidecars.json"
-if (-not (Test-Path $ManifestPath)) { throw "Falta sidecars.json; ejecuta npm run sidecars:download" }
+$LockPath = Join-Path $Bin "sidecars.lock.json"
+if (-not (Test-Path $LockPath)) { throw "Falta sidecars.lock.json" }
 
 function Get-Sha256([string]$Path) {
     $Hasher = [System.Security.Cryptography.SHA256]::Create()
     try {
         $Stream = [System.IO.File]::OpenRead($Path)
-        try {
-            return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant()
-        } finally {
-            $Stream.Dispose()
-        }
-    } finally {
-        $Hasher.Dispose()
-    }
+        try { return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant() }
+        finally { $Stream.Dispose() }
+    } finally { $Hasher.Dispose() }
 }
 
-$Manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
-foreach ($Tool in $Manifest.tools) {
+$Lock = Get-Content $LockPath -Raw | ConvertFrom-Json
+if ($Lock.schemaVersion -ne 1) { throw "schemaVersion de sidecars.lock.json no compatible" }
+$ExpectedTools = @($Lock.tools | Where-Object name -eq "yt-dlp.exe" | ForEach-Object { $_ }) + @($Lock.tools | Where-Object name -eq "ffmpeg" | ForEach-Object { $_.files })
+foreach ($Tool in $ExpectedTools) {
     $Path = Join-Path $Bin $Tool.name
     if (-not (Test-Path $Path)) { throw "Falta $($Tool.name)" }
     $Hash = Get-Sha256 $Path

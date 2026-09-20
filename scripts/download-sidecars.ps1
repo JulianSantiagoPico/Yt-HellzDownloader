@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $Root = Split-Path -Parent $PSScriptRoot
 $Bin = Join-Path $Root "src-tauri\binaries"
+$LockPath = Join-Path $Bin "sidecars.lock.json"
 $Temp = Join-Path ([System.IO.Path]::GetTempPath()) ("ytpd-sidecars-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $Bin, $Temp | Out-Null
 
@@ -9,75 +10,55 @@ function Get-Sha256([string]$Path) {
     $Hasher = [System.Security.Cryptography.SHA256]::Create()
     try {
         $Stream = [System.IO.File]::OpenRead($Path)
-        try {
-            return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant()
-        } finally {
-            $Stream.Dispose()
-        }
-    } finally {
-        $Hasher.Dispose()
-    }
+        try { return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant() }
+        finally { $Stream.Dispose() }
+    } finally { $Hasher.Dispose() }
 }
 
-function Get-GitHubApiHeaders {
-    $Headers = @{
-        "User-Agent" = "YT-Playlist-Downloader-Build"
-        "Accept" = "application/vnd.github+json"
-        "X-GitHub-Api-Version" = "2022-11-28"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
-        $Headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
-    }
-    return $Headers
+function Download-File([string]$Url, [string]$Path) {
+    Invoke-WebRequest -UseBasicParsing $Url -OutFile $Path
 }
 
-function Download-Verified([string]$Url, [string]$HashUrl, [string]$Name) {
-    $Target = Join-Path $Temp $Name
-    Invoke-WebRequest -UseBasicParsing $Url -OutFile $Target
-    $ChecksumResponse = Invoke-WebRequest -UseBasicParsing $HashUrl
-    $ChecksumText = if ($ChecksumResponse.Content -is [byte[]]) {
-        [System.Text.Encoding]::UTF8.GetString($ChecksumResponse.Content).Trim()
-    } else {
-        ([string]$ChecksumResponse.Content).Trim()
-    }
-    $Published = ($ChecksumText -split "`n" | Where-Object { $_ -match ([regex]::Escape($Name) + "\s*$") } | Select-Object -First 1)
-    if ($Published) {
-        $Expected = ($Published.Trim() -split "\s+")[0].ToLowerInvariant()
-    } elseif ($ChecksumText -match "^([a-fA-F0-9]{64})(\s|$)") {
-        $Expected = $Matches[1].ToLowerInvariant()
-    } else {
-        throw "No se encontró checksum publicado para $Name"
-    }
-    $Actual = Get-Sha256 $Target
-    if ($Actual -ne $Expected) { throw "Checksum inválido para $Name" }
-    return @{ Path = $Target; Sha256 = $Actual }
+function Assert-Hash([string]$Path, [string]$Expected, [string]$Name) {
+    $Actual = Get-Sha256 $Path
+    if ($Actual -ne $Expected.ToLowerInvariant()) { throw "Checksum inválido para $Name" }
 }
+
+if (-not (Test-Path $LockPath)) { throw "Falta sidecars.lock.json" }
+$Lock = Get-Content $LockPath -Raw | ConvertFrom-Json
+if ($Lock.schemaVersion -ne 1) { throw "schemaVersion de sidecars.lock.json no compatible" }
+$YtDlp = @($Lock.tools | Where-Object name -eq "yt-dlp.exe")
+$Ffmpeg = @($Lock.tools | Where-Object name -eq "ffmpeg")
+if ($YtDlp.Count -ne 1 -or $Ffmpeg.Count -ne 1) { throw "El lock debe definir yt-dlp.exe y ffmpeg exactamente una vez" }
 
 try {
-    $YtRelease = Invoke-RestMethod -Headers (Get-GitHubApiHeaders) "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
-    $Yt = Download-Verified ($YtRelease.assets | Where-Object name -eq "yt-dlp.exe").browser_download_url ($YtRelease.assets | Where-Object name -eq "SHA2-256SUMS").browser_download_url "yt-dlp.exe"
-    Copy-Item $Yt.Path (Join-Path $Bin "yt-dlp.exe") -Force
+    $YtPath = Join-Path $Temp "yt-dlp.exe"
+    Download-File $YtDlp[0].url $YtPath
+    Assert-Hash $YtPath $YtDlp[0].sha256 "yt-dlp.exe"
+    Copy-Item $YtPath (Join-Path $Bin "yt-dlp.exe") -Force
 
-    $FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-    $FfmpegHashUrl = "$FfmpegUrl.sha256"
-    $Archive = Download-Verified $FfmpegUrl $FfmpegHashUrl "ffmpeg-release-essentials.zip"
-    Expand-Archive $Archive.Path (Join-Path $Temp "ffmpeg") -Force
-    $Ffmpeg = Get-ChildItem (Join-Path $Temp "ffmpeg") -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
-    $Ffprobe = Get-ChildItem (Join-Path $Temp "ffmpeg") -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
-    if (-not $Ffmpeg -or -not $Ffprobe) { throw "El paquete FFmpeg no contiene las herramientas esperadas" }
-    Copy-Item $Ffmpeg.FullName (Join-Path $Bin "ffmpeg.exe") -Force
-    Copy-Item $Ffprobe.FullName (Join-Path $Bin "ffprobe.exe") -Force
+    $Archive = Join-Path $Temp "ffmpeg.zip"
+    $Extracted = Join-Path $Temp "ffmpeg"
+    Download-File $Ffmpeg[0].url $Archive
+    Expand-Archive $Archive $Extracted -Force
+    foreach ($File in @($Ffmpeg[0].files)) {
+        $RelativePath = $File.path.Replace("/", "\")
+        $Source = Get-ChildItem $Extracted -Recurse -File | Where-Object { $_.FullName.EndsWith($RelativePath, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+        if (-not $Source) { throw "El archivo FFmpeg no contiene $($File.name)" }
+        Assert-Hash $Source.FullName $File.sha256 $File.name
+        Copy-Item $Source.FullName (Join-Path $Bin $File.name) -Force
+    }
 
     $Manifest = @{
-        generatedAt = (Get-Date).ToUniversalTime().ToString("o")
+        lockSchemaVersion = $Lock.schemaVersion
         tools = @(
-            @{ name = "yt-dlp.exe"; version = $YtRelease.tag_name; sha256 = (Get-Sha256 (Join-Path $Bin "yt-dlp.exe")); source = "https://github.com/yt-dlp/yt-dlp/releases/tag/$($YtRelease.tag_name)" },
-            @{ name = "ffmpeg.exe"; sha256 = (Get-Sha256 (Join-Path $Bin "ffmpeg.exe")); source = $FfmpegUrl },
-            @{ name = "ffprobe.exe"; sha256 = (Get-Sha256 (Join-Path $Bin "ffprobe.exe")); source = $FfmpegUrl }
-        )
+            @{ name = $YtDlp[0].name; version = $YtDlp[0].version; sha256 = $YtDlp[0].sha256; source = $YtDlp[0].url }
+        ) + @($Ffmpeg[0].files | ForEach-Object {
+            @{ name = $_.name; version = $Ffmpeg[0].version; sha256 = $_.sha256; source = $Ffmpeg[0].url }
+        })
     }
     $Manifest | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Bin "sidecars.json") -Encoding UTF8
-    Write-Host "Sidecars descargados y verificados en $Bin"
+    Write-Host "Sidecars reproducibles descargados y verificados desde sidecars.lock.json"
 } finally {
     Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue
 }

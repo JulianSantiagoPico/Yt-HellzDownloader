@@ -1,7 +1,7 @@
 {
   "name": "yt-playlist-downloader",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,8 @@
     "prepare": "husky",
     "sidecars:download": "powershell -ExecutionPolicy Bypass -File scripts/download-sidecars.ps1",
     "sidecars:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-sidecars.ps1",
+    "sidecars:lock:check": "powershell -ExecutionPolicy Bypass -File scripts/test-sidecars-lock.ps1",
+    "sidecars:lock:update": "powershell -ExecutionPolicy Bypass -File scripts/update-sidecars-lock.ps1",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1"
   },
   "dependencies": {

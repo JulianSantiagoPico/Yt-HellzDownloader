@@ -31,84 +31,45 @@ pub async fn batch_insert_playlist_items(
 
     let mut tx = pool.begin().await?;
 
-    // 1. Deduplicar por youtube_video_id
+    // 1. Deduplicar por youtube_video_id e insertar tracks
+    //    Usamos ID determinista trk_{youtube_video_id}. ON CONFLICT actualiza metadata.
     let mut seen_ids = HashSet::new();
     let unique_tracks: Vec<&PlaylistEntry> = entries
         .iter()
         .filter(|e| seen_ids.insert(&e.id))
         .collect();
 
-    // 1a. Consultar tracks existentes para reusar sus IDs
-    let mut existing_query = QueryBuilder::<Sqlite>::new(
-        "SELECT youtube_video_id, id FROM tracks WHERE youtube_video_id IN ("
+    let mut track_builder = QueryBuilder::<Sqlite>::new(
+        "INSERT INTO tracks (id, youtube_video_id, source_url, title, artist, channel, published_at, duration_seconds, thumbnail_url, availability, metadata, created_at, updated_at) "
     );
-    {
-        let mut separated = existing_query.separated(", ");
-        for entry in &unique_tracks {
-            separated.push_bind(&entry.id);
-        }
-    }
-    existing_query.push(")");
 
-    let existing_rows: Vec<(String, String)> = existing_query
-        .build_query_as()
-        .fetch_all(&mut *tx)
-        .await?;
+    track_builder.push_values(unique_tracks.iter(), |mut b, entry| {
+        let track_id = format!("trk_{}", entry.id);
+        b.push_bind(track_id)
+            .push_bind(&entry.id)
+            .push_bind(&entry.url)
+            .push_bind(&entry.title)
+            .push_bind(&entry.artist)
+            .push_bind("")
+            .push_bind(Option::<String>::None)
+            .push_bind(entry.duration_seconds)
+            .push_bind(Option::<String>::None)
+            .push_bind(entry.availability.as_str())
+            .push_bind(Option::<String>::None)
+            .push_bind(now)
+            .push_bind(now);
+    });
 
-    let existing_map: std::collections::HashMap<String, String> =
-        existing_rows.into_iter().collect();
+    track_builder.push(
+        " ON CONFLICT(youtube_video_id) DO UPDATE SET \
+         title = excluded.title, \
+         artist = excluded.artist, \
+         duration_seconds = COALESCE(excluded.duration_seconds, tracks.duration_seconds), \
+         availability = excluded.availability, \
+         updated_at = excluded.updated_at",
+    );
 
-    // 1b. Insertar tracks nuevos (solo los que no existen)
-    let new_tracks: Vec<&&PlaylistEntry> = unique_tracks
-        .iter()
-        .filter(|e| !existing_map.contains_key(&e.id))
-        .collect();
-
-    if !new_tracks.is_empty() {
-        let mut track_builder = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO tracks (id, youtube_video_id, source_url, title, artist, channel, published_at, duration_seconds, thumbnail_url, availability, metadata, created_at, updated_at) "
-        );
-
-        track_builder.push_values(new_tracks.iter(), |mut b, entry| {
-            let track_id = format!("trk_{}", entry.id);
-            b.push_bind(track_id)
-                .push_bind(&entry.id)
-                .push_bind(&entry.url)
-                .push_bind(&entry.title)
-                .push_bind(&entry.artist)
-                .push_bind("")
-                .push_bind(Option::<String>::None)
-                .push_bind(entry.duration_seconds)
-                .push_bind(Option::<String>::None)
-                .push_bind(entry.availability.as_str())
-                .push_bind(Option::<String>::None)
-                .push_bind(now)
-                .push_bind(now);
-        });
-
-        track_builder.push(
-            " ON CONFLICT(youtube_video_id) DO UPDATE SET \
-             title = excluded.title, \
-             artist = excluded.artist, \
-             duration_seconds = COALESCE(excluded.duration_seconds, tracks.duration_seconds), \
-             availability = excluded.availability, \
-             updated_at = excluded.updated_at",
-        );
-
-        track_builder.build().execute(&mut *tx).await?;
-    }
-
-    // 1c. Construir mapa completo youtube_video_id → track_id (existente o nuevo)
-    let track_id_map: std::collections::HashMap<String, String> = unique_tracks
-        .iter()
-        .map(|e| {
-            let track_id = existing_map
-                .get(&e.id)
-                .cloned()
-                .unwrap_or_else(|| format!("trk_{}", e.id));
-            (e.id.clone(), track_id)
-        })
-        .collect();
+    track_builder.build().execute(&mut *tx).await?;
 
     // 2. Multi-row INSERT para playlist_tracks
     let pt_ids: Vec<String> = (0..entries.len())
@@ -120,10 +81,7 @@ pub async fn batch_insert_playlist_items(
     );
 
     pt_builder.push_values(entries.iter().zip(pt_ids.iter()), |mut b, (entry, pt_id)| {
-        let track_id = track_id_map
-            .get(&entry.id)
-            .cloned()
-            .unwrap_or_else(|| format!("trk_{}", entry.id));
+        let track_id = format!("trk_{}", entry.id);
         b.push_bind(pt_id)
             .push_bind(actual_playlist_id)
             .push_bind(track_id)
@@ -185,10 +143,7 @@ pub async fn batch_insert_playlist_items(
     );
 
     ji_builder.push_values(entries.iter().zip(resolved_pt_ids.iter()), |mut b, (entry, pt_id)| {
-        let track_id = track_id_map
-            .get(&entry.id)
-            .cloned()
-            .unwrap_or_else(|| format!("trk_{}", entry.id));
+        let track_id = format!("trk_{}", entry.id);
         let job_item_id = Uuid::new_v4().to_string();
 
         let is_unavailable = matches!(

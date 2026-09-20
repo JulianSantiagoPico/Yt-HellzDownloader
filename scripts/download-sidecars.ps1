@@ -19,6 +19,18 @@ function Get-Sha256([string]$Path) {
     }
 }
 
+function Get-GitHubApiHeaders {
+    $Headers = @{
+        "User-Agent" = "YT-Playlist-Downloader-Build"
+        "Accept" = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+        $Headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+    }
+    return $Headers
+}
+
 function Download-Verified([string]$Url, [string]$HashUrl, [string]$Name) {
     $Target = Join-Path $Temp $Name
     Invoke-WebRequest -UseBasicParsing $Url -OutFile $Target
@@ -42,7 +54,7 @@ function Download-Verified([string]$Url, [string]$HashUrl, [string]$Name) {
 }
 
 try {
-    $YtRelease = Invoke-RestMethod -Headers @{ "User-Agent" = "YT-Playlist-Downloader-Build" } "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+    $YtRelease = Invoke-RestMethod -Headers (Get-GitHubApiHeaders) "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
     $Yt = Download-Verified ($YtRelease.assets | Where-Object name -eq "yt-dlp.exe").browser_download_url ($YtRelease.assets | Where-Object name -eq "SHA2-256SUMS").browser_download_url "yt-dlp.exe"
     Copy-Item $Yt.Path (Join-Path $Bin "yt-dlp.exe") -Force
 

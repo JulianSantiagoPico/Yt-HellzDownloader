@@ -57,6 +57,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - name: Download and verify test sidecars
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npm run sidecars:download
           npm run sidecars:verify

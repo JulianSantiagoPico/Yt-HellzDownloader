@@ -27,6 +27,8 @@ jobs:
           $appVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($tagVersion -ne $appVersion) { throw "El tag v$tagVersion no coincide con la versión $appVersion." }
       - name: Download verified sidecars
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run sidecars:download
       - name: Verify sidecars
         run: npm run sidecars:verify

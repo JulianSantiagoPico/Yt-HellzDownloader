@@ -13,7 +13,7 @@ interface ExtractionResult {
   total: number;
   available: number;
   unavailable: number;
-  playlist_id: string;
+  playlistId: string;
 }
 
 interface Job {
